@@ -1,0 +1,120 @@
+{
+  "adspower": {
+    "requestIntervalMs": 1100
+  },
+  "fingerprint": {
+    "syncBeforeScan": false,
+    "desktop": {
+      "automatic_timezone": "1",
+      "language": ["tr-TR", "tr"]
+    },
+    "mobile": {
+      "automatic_timezone": "1",
+      "language": ["tr-TR", "tr"]
+    }
+  },
+  "captcha": {
+    "enabled": true,
+    "provider": "auto"
+  },
+  "google": {
+    "domain": "www.google.com",
+    "hl": "tr",
+    "gl": "tr",
+    "num": 10,
+    "uule": "",
+    "extraParams": {
+      "pws": "0"
+    }
+  },
+  "location": {
+    "country": "TR",
+    "city": "Istanbul"
+  },
+  "devices": ["desktop", "mobile"],
+  "scan": {
+    "hopCap": 12,
+    "navTimeoutMs": 45000,
+    "resolveTimeoutMs": 30000,
+    "minDelayMs": 8000,
+    "maxDelayMs": 18000,
+    "screenshots": true,
+    "resolveLandings": true,
+    "concurrency": 10,
+    "rotateProfiles": true,
+    "queriesPerProfile": 5,
+    "profilePrefix": "TR-ISP-",
+    "mobileProfilePrefix": "TR-MOBILE-",
+    "clearProfileData": false,
+    "maxProfilesPerDevice": 5,
+    "autoClickAfterScan": true,
+    "autoFocusCampaignAfterScan": true,
+    "firstAdSwarm": false,
+    "swarmClicksPerProfile": 10,
+    "swarmReportsPerProfile": 10,
+    "swarmMinDelayMs": 30000,
+    "swarmMaxDelayMs": 90000
+  },
+  "click": {
+    "mode": "adaptive",
+    "concurrency": 10,
+    "durationMinutes": 60,
+    "clicksPerProfile": 30,
+    "staggerWindowSeconds": 300,
+    "minDelayMs": 3000,
+    "maxDelayMs": 10000,
+    "maxClicksPerProfilePerHour": 2,
+    "sameAdCooldownMinutes": 20,
+    "maxProfilesPerDevice": 10,
+    "behavior": {
+      "minPreClickMs": 5000,
+      "maxPreClickMs": 15000,
+      "minStayMs": 15000,
+      "maxStayMs": 45000,
+      "scrollChance": 0.9,
+      "mouseMoveChance": 0.7,
+      "internalLinkChance": 0.25,
+      "minInternalStayMs": 8000,
+      "maxInternalStayMs": 20000,
+      "mobileViewport": { "width": 393, "height": 851 }
+    }
+  },
+  "output": {
+    "sqlite": true,
+    "json": true,
+    "csv": true
+  },
+  "report": {
+    "emailEnabled": false,
+    "autoExportOnScan": false,
+    "autoEmailOnScan": false,
+    "from": "",
+    "to": [],
+    "autoSerpSubmit": true,
+    "autoSerpMaxAds": 20,
+    "autoSerpDelayMinMs": 30000,
+    "autoSerpDelayMaxMs": 90000,
+    "reportEmail": "ho6y2cyg1h@lnovic.com",
+    "emailPool": {
+      "enabled": true,
+      "minSize": 250
+    }
+  },
+  "bettingKeywords": [
+    "bahis",
+    "casino",
+    "slot",
+    "bonus",
+    "deneme bonusu",
+    "canli bahis",
+    "iddaa",
+    "rulet",
+    "poker",
+    "betting",
+    "giris",
+    "guncel giris",
+    "uyelik",
+    "kayit ol",
+    "hemen katil"
+  ]
+}

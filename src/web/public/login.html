@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Detect</title>
+  <link rel="icon" type="image/png" href="/assets/logo-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body class="login-body">
+  <div class="bg-grid"></div>
+  <div class="scanline"></div>
+
+  <main class="login-wrap">
+    <div class="login-card">
+      <div class="login-glare"></div>
+      <div class="brand login-brand">
+        <img src="/assets/logo-full.png" alt="Detect" class="login-logo" />
+      </div>
+
+      <div class="login-terminal">
+        <span class="prompt">root@detect:~$</span> <span class="typed">auth --required</span><span class="cursor">▊</span>
+      </div>
+
+      <form id="login-form" autocomplete="off">
+        <div class="field">
+          <label>Kullanıcı Adı</label>
+          <input type="text" id="login-user" required autofocus placeholder="operator" />
+        </div>
+        <div class="field">
+          <label>Şifre</label>
+          <input type="password" id="login-pass" required placeholder="••••••••" />
+        </div>
+        <button type="submit" class="btn btn-primary login-btn">
+          <span class="btn-icon">▶</span> Sisteme Gir
+        </button>
+        <div id="login-msg" class="form-msg login-msg"></div>
+      </form>
+
+      <div class="login-foot">
+        <span>SECURE CHANNEL</span><span class="blink">●</span><span>TLS LOCAL</span>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const form = document.getElementById("login-form");
+    const msg = document.getElementById("login-msg");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      msg.textContent = "doğrulanıyor…";
+      msg.className = "form-msg login-msg";
+      try {
+        const r = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            user: document.getElementById("login-user").value.trim(),
+            password: document.getElementById("login-pass").value,
+          }),
+        });
+        if (r.ok) {
+          msg.textContent = "erişim onaylandı → yönlendiriliyor";
+          msg.classList.add("ok");
+          setTimeout(() => (window.location.href = "/"), 350);
+        } else {
+          const e2 = await r.json().catch(() => ({}));
+          msg.textContent = e2.error || "erişim reddedildi";
+          msg.classList.add("err");
+        }
+      } catch (err) {
+        msg.textContent = "bağlantı hatası: " + err.message;
+        msg.classList.add("err");
+      }
+    });
+  </script>
+</body>
+</html>

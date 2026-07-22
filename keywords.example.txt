@@ -1,0 +1,10 @@
+# One keyword (search query) per line.
+# Lines starting with '#' and blank lines are ignored.
+# These are scanned on Google Turkey for both desktop and mobile.
+
+bahis
+bahis siteleri
+canli bahis
+guvenilir bahis siteleri
+deneme bonusu
+slot siteleri

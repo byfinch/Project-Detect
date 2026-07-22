@@ -1,0 +1,21 @@
+[Unit]
+Description=Detect Ops Center (web panel + scheduler)
+After=network.target
+
+[Service]
+Type=simple
+User=detect
+WorkingDirectory=/opt/project-detect
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/project-detect/.env
+ExecStart=/usr/bin/node dist/index.js web -p 3000
+Restart=always
+RestartSec=10
+# RAM guard: 10-15 parallel AdsPower browsers ≈ 7-10 GB
+MemoryMax=10G
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/opt/project-detect
+
+[Install]
+WantedBy=multi-user.target

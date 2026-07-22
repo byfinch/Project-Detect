@@ -1,0 +1,41 @@
+{
+  "name": "project-detect",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Google SERP paid-ad detection scanner (Turkey locale, desktop + mobile) driven by AdsPower profiles",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "detect": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-web-assets.mjs",
+    "scan": "node dist/index.js scan",
+    "profiles": "node dist/index.js profiles",
+    "report": "node dist/index.js report",
+    "doctor": "node dist/index.js doctor",
+    "web": "node dist/index.js web",
+    "probe-ips": "node dist/index.js probe-ips",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.7",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "pino": "^9.6.0",
+    "playwright-core": "^1.49.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.10.5",
+    "pino-pretty": "^13.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

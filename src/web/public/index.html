@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Detect</title>
+  <link rel="icon" type="image/png" href="/assets/logo-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <div class="scanline"></div>
+
+  <nav class="topbar">
+    <div class="topbar-left">
+      <div class="brand">
+        <span class="logo logo-img-wrap"><img src="/assets/logo-icon.png" alt="Detect" class="logo-img" /></span>
+        <div>
+          <div class="brand-title">DETECT</div>
+          <div class="brand-sub">OPS CENTER</div>
+        </div>
+      </div>
+      <div class="topbar-nav">
+        <button class="nav-item active" data-view="scan">Tarama</button>
+        <button class="nav-item" data-view="ops">Operasyonlar</button>
+        <button class="nav-item" data-view="proof">Raporlama</button>
+        <button class="nav-item" data-view="log">Terminal</button>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <div class="pill" id="pill-ads"><span class="dot"></span>AdsPower</div>
+      <div class="pill" id="pill-jobs">0 iş</div>
+      <div class="pill" id="pill-solver" title="Solver maliyeti">$0</div>
+      <button class="pill pill-btn" id="btn-logout" title="Çıkış yap">Çıkış ⏻</button>
+    </div>
+  </nav>
+
+  <main class="container">
+    <!-- ═══ TARAMA (varsayılan) ═══ -->
+    <div class="view" id="view-scan">
+      <header class="page-header">
+        <h1>Tarama</h1>
+        <p class="subtitle">Yeni tarama başlat, geçmiş taramaları incele.</p>
+      </header>
+
+      <section class="panel" id="scan-panel">
+        <div class="panel-head">
+          <div class="panel-icon scan-icon"><img src="/assets/ic-tarama.png" alt="" /></div>
+          <div>
+            <h2>Tarama Başlat</h2>
+            <p class="panel-desc">Google TR’deki rakip reklamlarını keşfet.</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <form id="scan-form">
+            <div class="field">
+              <label>Markalar / Keywords</label>
+              <textarea id="scan-brands" rows="5" placeholder="herabet&#10;primebahis&#10;napolibet&#10;rovbet&#10;vegasslot" required></textarea>
+              <span class="hint">Her satıra bir marka yaz.</span>
+            </div>
+            <div class="row">
+              <div class="field">
+                <label>Cihaz</label>
+                <select id="scan-devices">
+                  <option value="both">Mobil + Masaüstü</option>
+                  <option value="mobile">Sadece Mobil</option>
+                  <option value="desktop">Sadece Masaüstü</option>
+                </select>
+              </div>
+              <div class="field checkbox-field">
+                <label class="switch">
+                  <input type="checkbox" id="scan-expand" />
+                  <span class="slider"></span>
+                </label>
+                <div class="switch-label">
+                  <strong>Varyant ekle</strong>
+                  <span class="hint">giriş, bonus gibi eklemeler</span>
+                </div>
+              </div>
+            </div>
+            <div class="form-actions">
+              <button type="submit" id="btn-start-scan" class="btn btn-primary">
+                <span class="btn-icon">▶</span> Taramayı Başlat
+              </button>
+              <span id="scan-form-msg" class="form-msg"></span>
+            </div>
+            <div id="scheduled-info" class="scheduled-info"></div>
+            <div class="scheduled-toggle">
+              <label class="switch">
+                <input type="checkbox" id="scheduled-enabled" checked />
+                <span class="slider"></span>
+              </label>
+              <div class="switch-label">
+                <strong>Otomatik tarama</strong>
+              </div>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel" id="results-panel">
+        <div class="panel-head">
+          <div class="panel-icon results-icon"><img src="/assets/ic-taramasonuclari.png" alt="" /></div>
+          <div>
+            <h2>Tarama Sonuçları</h2>
+            <p class="panel-desc">Son taramalar ve bulunan reklam sayıları.</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="table-wrap">
+            <table id="tbl-scans">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Durum</th>
+                  <th>Markalar</th>
+                  <th>Cihaz</th>
+                  <th>Ads</th>
+                  <th>Tarih</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div id="scans-pager" class="pager"></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ═══ OPERASYONLAR ═══ -->
+    <div class="view hidden" id="view-ops">
+      <header class="page-header">
+        <h1>Operasyonlar</h1>
+        <p class="subtitle">Çalışan görevler ve operasyon bazlı tıklama-şikayet dökümü.</p>
+      </header>
+
+      <section class="panel" id="ops-panel">
+        <div class="panel-head">
+          <div class="panel-icon ops-icon"><img src="/assets/ic-operasyonlar.png" alt="" /></div>
+          <div>
+            <h2>Operasyonlar</h2>
+            <p class="panel-desc">Çalışan ve bekleyen görevler.</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="op-grid">
+            <div class="op-card">
+              <div class="op-header">
+                <div class="op-icon"><img src="/assets/ic-focus.png" alt="" /></div>
+                <div class="op-status" id="focus-status-badge">PASİF</div>
+              </div>
+              <h3>Focus Tıklama</h3>
+              <p class="op-desc">SERP #1 reklama 2 saatlik odaklı tıklama penceresi. Sonrasında otomatik rescan.</p>
+              <div class="op-meta" id="focus-status">Beklemede</div>
+              <button id="btn-stop-focus" class="btn btn-danger" disabled>
+                <span class="btn-icon">■</span> Durdur
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="jobs-panel">
+        <div class="panel-head">
+          <div class="panel-icon jobs-icon"><img src="/assets/ic-canlisler.png" alt="" /></div>
+          <div>
+            <h2>Canlı İşler</h2>
+            <p class="panel-desc">Şu an çalışan ve son tamamlanan işler.</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="jobs-list" class="jobs-list">
+            <div class="empty">Aktif iş yok</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="health-panel">
+        <div class="panel-head">
+          <div class="panel-icon jobs-icon">♥</div>
+          <div>
+            <h2>Profil Sağlığı</h2>
+            <p class="panel-desc">Trust durumu: usable (yeşil) · captcha (kırmızı) · cooling (amber).</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="health-grid" class="health-grid"><div class="empty">Yükleniyor…</div></div>
+        </div>
+      </section>
+
+      <section class="panel" id="kpi-panel">
+        <div class="panel-head">
+          <div class="panel-icon results-icon">≋</div>
+          <div>
+            <h2>SERP Varlık Eğrisi</h2>
+            <p class="panel-desc">Hedef domainlerin SERP'te görünme yoğunluğu — baskının etkisi burada okunur.</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="kpi-heatmap" class="kpi-heatmap"><div class="empty">Veri yükleniyor…</div></div>
+        </div>
+      </section>
+
+      <section class="panel" id="op-results-panel">
+        <div class="panel-head">
+          <div class="panel-icon op-results-icon">📊</div>
+          <div>
+            <h2>Operasyon Sonuçları</h2>
+            <p class="panel-desc">Operasyon × reklam bazında tıklama ve şikayet — bir operasyonun tüm dalgaları tek satırda birikir; yeni operasyon sıfırdan başlar.</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="table-wrap">
+            <table id="tbl-op-results">
+              <thead>
+                <tr>
+                  <th>Operasyon</th>
+                  <th>Keyword</th>
+                  <th>Domain</th>
+                  <th>Cihaz</th>
+                  <th>Deneme</th>
+                  <th>Tıklama</th>
+                  <th>Şikayet</th>
+                  <th>Başlangıç</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div id="op-results-empty" class="empty">Henüz operasyon verisi yok</div>
+          <div id="op-results-pager" class="pager"></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ═══ KANIT ═══ -->
+    <div class="view hidden" id="view-proof">
+      <header class="page-header">
+        <h1>Kanıt — Şikayet Kayıtları</h1>
+        <p class="subtitle">Gönderilen her şikayet; kullanılan mail, durum ve Google bildirim numarasıyla.</p>
+      </header>
+
+      <section class="panel" id="proof-panel">
+        <div class="panel-head">
+          <div class="panel-icon complaints-icon">⚑</div>
+          <div>
+            <h2>Gönderilen Şikayetler</h2>
+            <p class="panel-desc">Her satır tek bir şikayet — müşteriye kanıt olarak sunulabilir.</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="proof-filters">
+            <input type="text" id="proof-filter-keyword" placeholder="keyword (örn. rovbet)" />
+            <input type="text" id="proof-filter-domain" placeholder="domain (örn. cicadr.com)" />
+            <input type="text" id="proof-filter-operation" placeholder="operasyon (örn. click-mr…)" />
+            <select id="proof-filter-device">
+              <option value="">Tüm cihazlar</option>
+              <option value="mobile">Mobil</option>
+              <option value="desktop">Masaüstü</option>
+            </select>
+            <button id="proof-filter-apply" class="pager-btn">Filtrele</button>
+            <a id="proof-export" class="pager-btn proof-export" href="/api/reports/submitted/export" target="_blank">Excel indir ↓</a>
+          </div>
+          <div class="table-wrap">
+            <table id="tbl-proof">
+              <thead>
+                <tr>
+                  <th>Tarih</th>
+                  <th>Keyword</th>
+                  <th>Domain</th>
+                  <th>Cihaz</th>
+                  <th>Mail</th>
+                  <th>Durum</th>
+                  <th>Google Onayı</th>
+                  <th>Sonuç</th>
+                  <th>Görsel</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div id="proof-empty" class="empty">Henüz gönderilmiş şikayet yok</div>
+          <div id="proof-pager" class="pager"></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ═══ TERMİNAL ═══ -->
+    <div class="view hidden" id="view-log">
+      <header class="page-header">
+        <h1>Terminal</h1>
+        <p class="subtitle">Sistem olayları ve hata kayıtları.</p>
+      </header>
+
+      <section class="panel" id="log-panel">
+        <div class="panel-head">
+          <div class="panel-icon log-icon"><img src="/assets/ic-terminal.png" alt="" /></div>
+          <div>
+            <h2>Terminal Log</h2>
+            <p class="panel-desc">Sistem olayları ve hata kayıtları.</p>
+          </div>
+          <button id="btn-clear-log" class="btn btn-danger panel-head-btn">Temizle</button>
+        </div>
+        <div class="panel-body">
+          <div id="log"></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
