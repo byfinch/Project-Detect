@@ -334,6 +334,17 @@ async function runDeviceClickEngine(
   let consecutiveNotFoundSkips = 0;
   let deviceBlind = false;
 
+  /**
+   * Tail watchdog: when the queue is drained and only stragglers remain, the
+   * freed slots have no work left — one wedged tail job holds the whole wave
+   * (and the campaign's next wave) hostage. A healthy job is ~2-4 min, so any
+   * job older than 5m with an empty queue is force-closed. forceClosed guards
+   * against double counting when the killed job's own promise rejects later.
+   */
+  const runningSince = new Map<string, number>();
+  const forceClosed = new Set<string>();
+  const TAIL_JOB_MAX_MS = 5 * 60 * 1000;
+
   function globalDone(): {
     completed: number;
     failed: number;
@@ -391,6 +402,7 @@ async function runDeviceClickEngine(
 
   async function executeJob(job: ClickJob): Promise<void> {
     runningProfiles.add(job.profileId);
+    runningSince.set(job.profileId, Date.now());
     {
       const g = globalDone();
       onProgress?.({
@@ -441,6 +453,7 @@ async function runDeviceClickEngine(
           };
         }),
       ]);
+      if (forceClosed.has(job.profileId)) return; // tail watchdog already counted this job
       results.push(result);
       ctx.store.insertClick(ctx.runId, result);
 
@@ -560,6 +573,7 @@ async function runDeviceClickEngine(
       });
       emitHeartbeat(true);
     } catch (err) {
+      if (forceClosed.has(job.profileId)) return; // tail watchdog already counted this job
       logger.error({ jobId: job.id, err: String(err) }, "unexpected click job error");
       failed++;
       bumpShared("failed");
@@ -583,6 +597,7 @@ async function runDeviceClickEngine(
       });
     } finally {
       runningProfiles.delete(job.profileId);
+      runningSince.delete(job.profileId);
       emitHeartbeat();
     }
   }
@@ -706,6 +721,32 @@ async function runDeviceClickEngine(
         continue;
       }
       void executeJob(job);
+    }
+    // Tail watchdog: queue drained, only stragglers left — a healthy job is
+    // ~2-4 min, so anything older than 5m with an empty queue is a wedge
+    // holding the next wave hostage. Force-close it and let the run finish.
+    if (pending.length === 0) {
+      for (const pid of [...runningProfiles]) {
+        if (forceClosed.has(pid)) continue;
+        const since = runningSince.get(pid) ?? Date.now();
+        if (Date.now() - since > TAIL_JOB_MAX_MS) {
+          forceClosed.add(pid);
+          logger.warn({ device, profileId: pid, ageMs: Date.now() - since }, "tail straggler force-closed (queue empty, job > 5m)");
+          await ctx.adsClient.stopBrowser(pid).catch(() => {});
+          releaseProfile(pid);
+          runningProfiles.delete(pid);
+          runningSince.delete(pid);
+          failed++;
+          bumpShared("failed");
+          onProgress?.({
+            type: "click-progress",
+            runId: ctx.runId,
+            device,
+            phase: "tail-kill",
+            message: `${device} · kuyruk boş · 5 dk'yı aşan son iş kapatıldı · dalga tamamlanıyor`,
+          });
+        }
+      }
     }
     emitHeartbeat();
     if (pending.length > 0 || runningProfiles.size > 0) {
