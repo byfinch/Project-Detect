@@ -337,13 +337,13 @@ async function runDeviceClickEngine(
   /**
    * Tail watchdog: when the queue is drained and only stragglers remain, the
    * freed slots have no work left — one wedged tail job holds the whole wave
-   * (and the campaign's next wave) hostage. A healthy job is ~2-4 min, so any
-   * job older than 5m with an empty queue is force-closed. forceClosed guards
+   * (and the campaign's next wave) hostage. Healthy jobs run ~30-90s, so any
+   * job older than 2m with an empty queue is force-closed. forceClosed guards
    * against double counting when the killed job's own promise rejects later.
    */
   const runningSince = new Map<string, number>();
   const forceClosed = new Set<string>();
-  const TAIL_JOB_MAX_MS = 5 * 60 * 1000;
+  const TAIL_JOB_MAX_MS = 2 * 60 * 1000; // healthy jobs run ~30-90s; >2m with an empty queue = wedge
 
   function globalDone(): {
     completed: number;
@@ -722,8 +722,8 @@ async function runDeviceClickEngine(
       }
       void executeJob(job);
     }
-    // Tail watchdog: queue drained, only stragglers left — a healthy job is
-    // ~2-4 min, so anything older than 5m with an empty queue is a wedge
+    // Tail watchdog: queue drained, only stragglers left — healthy jobs run
+    // ~30-90s, so anything older than 2m with an empty queue is a wedge
     // holding the next wave hostage. Force-close it and let the run finish.
     if (pending.length === 0) {
       for (const pid of [...runningProfiles]) {
@@ -731,7 +731,7 @@ async function runDeviceClickEngine(
         const since = runningSince.get(pid) ?? Date.now();
         if (Date.now() - since > TAIL_JOB_MAX_MS) {
           forceClosed.add(pid);
-          logger.warn({ device, profileId: pid, ageMs: Date.now() - since }, "tail straggler force-closed (queue empty, job > 5m)");
+          logger.warn({ device, profileId: pid, ageMs: Date.now() - since }, "tail straggler force-closed (queue empty, job > 2m)");
           await ctx.adsClient.stopBrowser(pid).catch(() => {});
           releaseProfile(pid);
           runningProfiles.delete(pid);
@@ -743,7 +743,7 @@ async function runDeviceClickEngine(
             runId: ctx.runId,
             device,
             phase: "tail-kill",
-            message: `${device} · kuyruk boş · 5 dk'yı aşan son iş kapatıldı · dalga tamamlanıyor`,
+            message: `${device} · kuyruk boş · 2 dk'yı aşan son iş kapatıldı · dalga tamamlanıyor`,
           });
         }
       }
