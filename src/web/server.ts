@@ -604,7 +604,10 @@ export function createWebServer(port: number): void {
     const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
     const r = store.db
       .prepare(
-        `UPDATE scans SET finished_at = ?, notes = COALESCE(notes, '') || ' | auto-closed stale'
+        `UPDATE scans
+         SET finished_at = ?,
+             total_ads = (SELECT COUNT(*) FROM results WHERE results.scan_id = scans.id),
+             notes = COALESCE(notes, '') || ' | auto-closed stale'
          WHERE finished_at IS NULL AND started_at < ?`
       )
       .run(new Date().toISOString(), cutoff);
@@ -1271,7 +1274,9 @@ export function createWebServer(port: number): void {
       const scans = (
         store.db
           .prepare(
-            "SELECT id, started_at, finished_at, total_ads, keywords, devices, notes FROM scans ORDER BY id DESC LIMIT ? OFFSET ?"
+            `SELECT s.id, s.started_at, s.finished_at, s.keywords, s.devices, s.notes,
+                    MAX(s.total_ads, (SELECT COUNT(*) FROM results r WHERE r.scan_id = s.id)) AS total_ads
+             FROM scans s ORDER BY s.id DESC LIMIT ? OFFSET ?`
           )
           .all(limit, (page - 1) * limit) as Array<Record<string, unknown>>
       ).map((s) => ({
@@ -1291,7 +1296,9 @@ export function createWebServer(port: number): void {
       const rows = (
         store.db
           .prepare(
-            "SELECT id, started_at, finished_at, total_ads, keywords, devices, notes FROM scans ORDER BY id DESC LIMIT 50"
+            `SELECT s.id, s.started_at, s.finished_at, s.keywords, s.devices, s.notes,
+                    MAX(s.total_ads, (SELECT COUNT(*) FROM results r WHERE r.scan_id = s.id)) AS total_ads
+             FROM scans s ORDER BY s.id DESC LIMIT 50`
           )
           .all() as Array<Record<string, unknown>>
       ).map((s) => ({

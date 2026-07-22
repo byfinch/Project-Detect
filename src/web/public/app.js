@@ -263,13 +263,12 @@ async function refresh() {
   document.querySelectorAll(".pager-btn").forEach((b) => b.classList.add("loading"));
   try {
     const proofQs = proofFilterQs();
-    const [ops, complaintRes, opResultsRes, scansRes, proofRes, kpiRes, healthRes] = await Promise.all([
+    const [ops, complaintRes, opResultsRes, scansRes, proofRes, healthRes] = await Promise.all([
       API.get("/api/ops"),
       API.get("/api/reports/complaints/packs").catch(() => ({ packs: [] })),
       API.get(`/api/ops/results?page=${opResultsPage}&limit=${OP_RESULTS_LIMIT}`).catch(() => ({ results: [], total: 0, page: 1, limit: OP_RESULTS_LIMIT })),
       API.get(`/api/scans/paged?page=${scansPage}&limit=${SCANS_PER_PAGE}`).catch(() => ({ scans: [], total: 0, page: 1, limit: SCANS_PER_PAGE })),
       API.get(`/api/reports/submitted?page=${proofPage}&limit=${PROOF_LIMIT}${proofQs}`).catch(() => ({ results: [], total: 0, page: 1, limit: PROOF_LIMIT })),
-      API.get("/api/kpi/presence?days=14").catch(() => ({ days: [], domains: [] })),
       API.get("/api/profiles/health").catch(() => ({ profiles: [] })),
     ]);
     const adsPill = document.getElementById("pill-ads");
@@ -292,7 +291,6 @@ async function refresh() {
     renderScans(scansRes);
     renderOpResults(opResultsRes);
     renderProof(proofRes);
-    renderKpi(kpiRes);
     renderHealth(healthRes);
 
     const locked = isScanRunningFromOps || Date.now() < scanStartLockUntil;
@@ -480,30 +478,6 @@ function renderHealth(data) {
     `<div class="health-legend"><span>● usable: ${counts.usable}</span><span>● captcha: ${counts.captcha}</span><span>● cooling: ${counts.cooling}</span></div>`;
 }
 /* ── KPI presence heatmap ── */
-function renderKpi(data) {
-  const el = document.getElementById("kpi-heatmap");
-  if (!el) return;
-  const domains = data?.domains || [];
-  const days = data?.days || [];
-  if (!domains.length) {
-    el.innerHTML = `<div class="empty">Henüz varlık verisi yok</div>`;
-    return;
-  }
-  const lvl = (n) => (n === 0 ? "" : n === 1 ? "l1" : n === 2 ? "l2" : n <= 4 ? "l3" : "l4");
-  const dayHeader = `<div class="kpi-days">${days.map((d) => `<span>${d.slice(8)}</span>`).join("")}</div>`;
-  const rows = domains
-    .map(
-      (dom) => `<div class="kpi-row">
-        <div class="kpi-domain" title="${esc(dom.domain)}">${esc(dom.domain)}</div>
-        <div class="kpi-cells">${dom.days
-          .map((n) => `<div class="kpi-cell ${lvl(n)}" title="${n} gösterim">${n || ""}</div>`)
-          .join("")}</div>
-      </div>`
-    )
-    .join("");
-  el.innerHTML = dayHeader + rows;
-}
-
 /* ── Proof (submitted ad reports) ── */
 function renderProofPager(total, page, limit) {
   const pager = document.getElementById("proof-pager");
