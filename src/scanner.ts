@@ -978,9 +978,9 @@ async function runDeviceScan(
                 phase: "inline-click",
                 message: `Reklam göründü · profil AÇIK tutuluyor · ${clickTargets.length} domain tıklanacak · ${pname}`,
               });
+              const { clickAdsOnOpenSerpWithCap, InlineClickTimeoutError } = await import("./click/inlineClick.js");
               try {
-                const { clickAdsOnOpenSerp } = await import("./click/inlineClick.js");
-                await clickAdsOnOpenSerp({
+                await clickAdsOnOpenSerpWithCap({
                   config,
                   session: state.session,
                   device,
@@ -996,6 +996,19 @@ async function runDeviceScan(
                   onProgress,
                 });
               } catch (err) {
+                if (err instanceof InlineClickTimeoutError) {
+                  // Wedged renderer/CDP — this session is untrustworthy. Break the
+                  // keyword loop; closeState below kills the browser and unsticks it.
+                  logger.error({ device, profile: pname, err: String(err) }, "inline click WEDGED — closing profile, moving on");
+                  onProgress?.({
+                    type: "scan-progress",
+                    device,
+                    profileName: pname,
+                    phase: "inline-click-timeout",
+                    message: `Inline tık kilitlendi · profil kapatılıp sıradakine geçiliyor · ${pname}`,
+                  });
+                  break;
+                }
                 logger.warn({ device, profile: pname, err: String(err) }, "inline click after ad failed (scan continues)");
                 onProgress?.({
                   type: "scan-progress",
@@ -1168,9 +1181,9 @@ async function runDeviceScan(
                 const clickTargets = res.ads.filter((a) => a.adHref);
                 if (clickTargets.length > 0) {
                   const pname = ctx.profileNames.get(state.profileId) || state.profileId;
+                  const { clickAdsOnOpenSerpWithCap, InlineClickTimeoutError } = await import("./click/inlineClick.js");
                   try {
-                    const { clickAdsOnOpenSerp } = await import("./click/inlineClick.js");
-                    await clickAdsOnOpenSerp({
+                    await clickAdsOnOpenSerpWithCap({
                       config,
                       session: state.session,
                       device,
@@ -1186,6 +1199,28 @@ async function runDeviceScan(
                       onProgress,
                     });
                   } catch (err) {
+                    if (err instanceof InlineClickTimeoutError) {
+                      // Wedged renderer/CDP — kill the session, reopen a fresh
+                      // profile (openNext closes the old browser, which rejects
+                      // the hung protocol calls) and requeue the keyword.
+                      logger.error({ device, keyword, profileId: state.profileId, err: String(err) }, "inline click WEDGED — reopening profile");
+                      onProgress?.({
+                        type: "scan-progress",
+                        device,
+                        keyword,
+                        phase: "inline-click-timeout",
+                        message: "Inline tık kilitlendi · profil yenilenip keyword tekrar kuyruğa alınıyor",
+                      });
+                      if (state.profileId) hotProfiles.add(state.profileId);
+                      state.queriesOnProfile = queriesPerProfile;
+                      sharedQueue.unshift(keyword);
+                      const ok = await openNext(state, signal);
+                      if (!ok) {
+                        await closeState(state);
+                        return;
+                      }
+                      continue;
+                    }
                     logger.warn({ device, err: String(err) }, "inline click failed (shared queue)");
                   }
                 }

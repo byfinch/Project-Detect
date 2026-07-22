@@ -130,6 +130,40 @@ async function findAnchor(page: Page, ad: InlineAdTarget) {
 /**
  * Click visible ads on the current SERP page, then return to SERP (close landing tabs).
  */
+export class InlineClickTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InlineClickTimeoutError";
+  }
+}
+
+/**
+ * Hard cap around clickAdsOnOpenSerp. A stalled renderer/CDP call (seen live:
+ * autoReport probing on a wedged page) would otherwise freeze the whole scan
+ * leg forever — puppeteer protocol calls have no default timeout. On expiry
+ * the caller MUST close the profile browser: that rejects the hung CDP
+ * promises and lets the background invocation die.
+ * Budget: ~4 min per ad (report flow + resolve + click + Cloudflare + behave)
+ * plus 2 min margin — generous on purpose, this guard is for true wedges only.
+ */
+export async function clickAdsOnOpenSerpWithCap(opts: InlineClickOpts): Promise<InlineClickSummary> {
+  const capMs = Math.min(opts.maxClicks ?? 3, opts.ads.length) * 240_000 + 120_000;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      clickAdsOnOpenSerp(opts),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new InlineClickTimeoutError(`inline click hard timeout (${Math.round(capMs / 60000)}m)`)),
+          capMs
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineClickSummary> {
   const {
     config,
