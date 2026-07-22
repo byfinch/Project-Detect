@@ -1588,7 +1588,16 @@ export function createWebServer(port: number): void {
 
     setInterval(async () => {
       if (!scheduledScan.enabled) return;
-      if (isScanRunning() || (await isScanRunningInDb(config.output.dir))) return;
+      const tickNow = new Date();
+      if (isScanRunning() || (await isScanRunningInDb(config.output.dir))) {
+        // A scan is already running — skip any slot that fell inside it instead
+        // of firing a redundant catch-up scan the moment it ends.
+        if (scheduledScan.nextAt && tickNow >= new Date(scheduledScan.nextAt)) {
+          scheduledScan.nextAt = getNextScheduledSlot(tickNow).toISOString();
+          logger.info({ nextAt: scheduledScan.nextAt }, "scheduled scan slot skipped — scan already running");
+        }
+        return;
+      }
       const now = new Date();
       if (!scheduledScan.nextAt || now >= new Date(scheduledScan.nextAt)) {
         const slot = new Date(scheduledScan.nextAt || now);
