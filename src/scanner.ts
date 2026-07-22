@@ -47,17 +47,20 @@ export class ScanStepTimeoutError extends Error {
   }
 }
 
-function withScanStepCap<T>(p: Promise<T>, what: string): Promise<T> {
+function withScanStepCap<T>(p: Promise<T>, what: string, ms = SCAN_STEP_HARD_CAP_MS): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   return Promise.race([
     p.finally(() => {
       if (timer) clearTimeout(timer);
     }),
     new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new ScanStepTimeoutError(`${what} — hard timeout (6m)`)), SCAN_STEP_HARD_CAP_MS);
+      timer = setTimeout(() => reject(new ScanStepTimeoutError(`${what} — hard timeout (${Math.round(ms / 60000)}m)`)), ms);
     }),
   ]);
 }
+
+/** Close handshake must fail fast — a wedged renderer will never answer it. */
+const PROFILE_CLOSE_CAP_MS = 60_000;
 
 export interface BettingHit {
   device: string;
@@ -684,16 +687,8 @@ async function runDeviceScan(
 
   const openNext = async (state: WorkerState, localSignal?: AbortSignal): Promise<boolean> => {
     throwIfAborted("openNext");
-    if (state.profileId) {
-      const { gracefulProfileShutdown } = await import("./browser/shutdown.js");
-      await gracefulProfileShutdown(ads, state.session, state.profileId);
-    } else if (state.session) {
-      const { resetSessionTabsForClose } = await import("./browser/shutdown.js");
-      await resetSessionTabsForClose(state.session);
-      await state.session.detach().catch(() => {});
-    }
-    state.session = null;
-    state.profileId = null;
+    // closeState carries the 60s hard cap + AdsPower API kill for wedged renderers.
+    await closeState(state);
 
     for (let tried = 0; tried < pool.ids.length; tried++) {
       throwIfAborted("openNext");
@@ -798,7 +793,12 @@ async function runDeviceScan(
       } catch (err) {
         logger.warn({ device, profileId: candidate, err: String(err) }, "profile start failed, trying next");
         const { gracefulProfileShutdown } = await import("./browser/shutdown.js");
-        await gracefulProfileShutdown(ads, session ?? null, candidate);
+        await withScanStepCap(gracefulProfileShutdown(ads, session ?? null, candidate), `close failed profile ${candidate}`, PROFILE_CLOSE_CAP_MS).catch(
+          async (closeErr) => {
+            logger.error({ device, profileId: candidate, err: String(closeErr) }, "graceful close wedged — force-killing via AdsPower API");
+            await ads.stopBrowser(candidate).catch(() => {});
+          }
+        );
         state.session = null;
       }
     }
@@ -807,13 +807,26 @@ async function runDeviceScan(
 
   const closeState = async (state: WorkerState): Promise<void> => {
     const { gracefulProfileShutdown } = await import("./browser/shutdown.js");
-    if (state.profileId) {
-      await gracefulProfileShutdown(ads, state.session, state.profileId);
-    } else if (state.session) {
-      await state.session.detach().catch(() => {});
+    const pid = state.profileId;
+    try {
+      if (pid) {
+        // Hard cap + API kill: a wedged renderer never answers the CDP close
+        // handshake (seen live: mobile leg frozen 4h right at this line). After
+        // 60s, kill the browser through the AdsPower HTTP API — that channel
+        // does not depend on the stuck renderer.
+        await withScanStepCap(gracefulProfileShutdown(ads, state.session, pid), `close profile ${pid}`, PROFILE_CLOSE_CAP_MS).catch(
+          async (err) => {
+            logger.error({ device, profileId: pid, err: String(err) }, "graceful close wedged — force-killing via AdsPower API");
+            await ads.stopBrowser(pid).catch(() => {});
+          }
+        );
+      } else if (state.session) {
+        await state.session.detach().catch(() => {});
+      }
+    } finally {
+      state.session = null;
+      state.profileId = null;
     }
-    state.session = null;
-    state.profileId = null;
   };
 
   // How many brand queries per open session after trend warm.

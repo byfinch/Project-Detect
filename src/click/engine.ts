@@ -373,7 +373,7 @@ async function runDeviceClickEngine(
       pending: pending.length,
       total: lockedTotal,
       remaining,
-      message: `${device} · aktif ${runningProfiles.size} · bitti ${g.done}/${lockedTotal} · kalan ${queueLeft}`,
+      message: `${device} · aktif ${runningProfiles.size} · bitti ${Math.min(g.done, lockedTotal)}/${lockedTotal} · kalan ${queueLeft}`,
     });
   }
 
@@ -525,7 +525,7 @@ async function runDeviceClickEngine(
         skipped: g.skipped,
         total: lockedTotal,
         remaining,
-        message: `tık ${result.status}${reportPart} · ${job.targetDomain} · ${job.device} (${g.done}/${lockedTotal})`,
+        message: `tık ${result.status}${reportPart} · ${job.targetDomain} · ${job.device} (${Math.min(g.done, lockedTotal)}/${lockedTotal})`,
       });
       emitHeartbeat(true);
     } catch (err) {
