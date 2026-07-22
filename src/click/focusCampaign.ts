@@ -114,6 +114,13 @@ export function waveBudget(
   return { mobile: 5, desktop: 5 };
 }
 
+/**
+ * Waves are sized as a multiple of the base pool-capacity budget. 10-job
+ * waves idled every slot at each wave tail (~3min cycle); 5x covers ~15min
+ * of continuous work, so slots stay fed from the engine's own queue.
+ */
+export const WAVE_SIZE_FACTOR = 5;
+
 function brandsFromScan(store: Store, scanId: number): string[] {
   const row = store.db.prepare(`SELECT keywords FROM scans WHERE id = ?`).get(scanId) as
     | { keywords?: string }
@@ -284,7 +291,13 @@ export async function runFocusCampaign(opts: {
 
         const waveTarget: ClickTarget = {
           ...picked.target,
-          recommendedClicks: budget,
+          // Big waves, not 10-job packets: the engine feeds freed slots from
+          // its own queue continuously, so a ~15min wave keeps all slots busy.
+          // Small waves idled every slot at each wave tail for no benefit.
+          recommendedClicks: {
+            mobile: budget.mobile * WAVE_SIZE_FACTOR,
+            desktop: budget.desktop * WAVE_SIZE_FACTOR,
+          },
           planReason: `focus-window #${state.windowIndex} wave ${state.wave} · only ${picked.target.domain}`,
         };
 
