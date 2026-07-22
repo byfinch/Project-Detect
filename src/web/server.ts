@@ -1699,15 +1699,19 @@ export function createWebServer(port: number): void {
       try {
         const swept = sweepScreenshots();
         if (swept > 0) logger.info({ swept }, "idle reaper: old screenshots deleted");
-        const anyJobRunning = Array.from(jobs.values()).some((j) => j.status === "running");
-        if (anyJobRunning) return;
         const { AdsPowerClient } = await import("../adspower/client.js");
         const ads = new AdsPowerClient(config.adspower.baseUrl, config.adspower.apiKey, 250);
         if (!(await ads.isUp().catch(() => false))) return;
         const profiles = await ads.listProfiles();
         const pool = profiles.filter((p) => /^(TR-ISP-|TR-MOBILE-)/.test(p.name || ""));
+        // Sweep even while jobs run: only browsers NOT owned by a live worker
+        // are orphans. Previously the reaper skipped entirely during jobs, so
+        // orphaned windows from wedged jobs lingered for hours.
+        const { getInUseProfiles } = await import("../browser/profileRegistry.js");
+        const inUse = getInUseProfiles();
         const stopped: string[] = [];
         for (const p of pool) {
+          if (inUse.has(p.user_id)) continue; // legitimately working right now
           const a = await ads.browserActive(p.user_id).catch(() => null);
           if (a?.status === "Active") {
             await ads.stopBrowser(p.user_id).catch(() => {});

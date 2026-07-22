@@ -1,6 +1,7 @@
 import type { Page } from "playwright-core";
 import type { AppConfig } from "../config.js";
 import { BrowserSession } from "../browser/session.js";
+import { markProfileInUse, releaseProfile } from "../browser/profileRegistry.js";
 import { AdsPowerClient, captchaProxyFromProfile, type ProfileSummary } from "../adspower/client.js";
 import { buildSerpUrl, gotoSerp, prepareGoogleConsent, warmUp } from "../google/serp.js";
 import { parseAds } from "../google/adParser.js";
@@ -136,6 +137,8 @@ async function openProfile(ctx: WorkerContext, profileId: string, device: Device
   try {
     const ws = await ctx.adsClient.ensureBrowser(profileId);
     session = await BrowserSession.attach(ws);
+    // Mark immediately — the reaper must not kill this browser mid-warm-up.
+    markProfileInUse(profileId);
     await prepareGoogleConsent(session);
     if (device === "mobile") {
       const { applyMobileEmulation } = await import("../browser/mobileEmulation.js");
@@ -172,12 +175,14 @@ async function openProfile(ctx: WorkerContext, profileId: string, device: Device
       );
       const { gracefulProfileShutdown } = await import("../browser/shutdown.js");
       await gracefulProfileShutdown(ctx.adsClient, session, profileId);
+      releaseProfile(profileId);
       return null;
     }
     logger.info(
       { profileId, trend: warm.trend, method: warm.method, captchaSolved: warm.captchaSolved },
       "click worker session safe via trend"
     );
+    markProfileInUse(profileId);
     return session;
   } catch (err) {
     logger.warn({ profileId, err: String(err) }, "click worker failed to open profile");
@@ -188,13 +193,18 @@ async function openProfile(ctx: WorkerContext, profileId: string, device: Device
     } catch {
       /* best effort */
     }
+    releaseProfile(profileId);
     return null;
   }
 }
 
 async function closeProfile(ctx: WorkerContext, session: BrowserSession | null, profileId: string): Promise<void> {
-  const { gracefulProfileShutdown } = await import("../browser/shutdown.js");
-  await gracefulProfileShutdown(ctx.adsClient, session, profileId);
+  try {
+    const { gracefulProfileShutdown } = await import("../browser/shutdown.js");
+    await gracefulProfileShutdown(ctx.adsClient, session, profileId);
+  } finally {
+    releaseProfile(profileId);
+  }
 }
 
 async function maybeReportAdBeforeClick(

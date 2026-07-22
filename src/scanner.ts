@@ -4,6 +4,7 @@ import type { AppConfig } from "./config.js";
 import { PROJECT_ROOT } from "./config.js";
 import { AdsPowerClient, captchaProxyFromProfile, type CaptchaProxy, type ProfileSummary } from "./adspower/client.js";
 import { BrowserSession } from "./browser/session.js";
+import { markProfileInUse, releaseProfile } from "./browser/profileRegistry.js";
 import {
   buildSerpUrl,
   gotoSerp,
@@ -704,6 +705,9 @@ async function runDeviceScan(
         const ws = await ads.ensureBrowser(candidate);
         throwIfAborted("openNext candidate attach");
         session = await BrowserSession.attach(ws);
+        // Mark as soon as the browser exists — the reaper must not kill us
+        // mid-warm-up (mark happens again at profile-ready; Set add is free).
+        markProfileInUse(candidate);
         // Clear first, then re-seed consent — reverse order wiped CONSENT cookies.
         // When 2captcha recovery is on, NEVER wipe GOOGLE_ABUSE_EXEMPTION / NID:
         // those are what keep private ISP IPs usable day-to-day without manual solves.
@@ -789,9 +793,11 @@ async function runDeviceScan(
           trend: warm.trend,
           trustMethod: warm.method,
         });
+        markProfileInUse(candidate);
         return true;
       } catch (err) {
         logger.warn({ device, profileId: candidate, err: String(err) }, "profile start failed, trying next");
+        releaseProfile(candidate);
         const { gracefulProfileShutdown } = await import("./browser/shutdown.js");
         await withScanStepCap(gracefulProfileShutdown(ads, session ?? null, candidate), `close failed profile ${candidate}`, PROFILE_CLOSE_CAP_MS).catch(
           async (closeErr) => {
@@ -824,6 +830,7 @@ async function runDeviceScan(
         await state.session.detach().catch(() => {});
       }
     } finally {
+      if (pid) releaseProfile(pid);
       state.session = null;
       state.profileId = null;
     }

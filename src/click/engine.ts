@@ -14,6 +14,7 @@ import type {
 } from "./types.js";
 import { deviceOfProfile, selectPools } from "./pool.js";
 import { runClickJob, type WorkerContext } from "./worker.js";
+import { releaseProfile } from "../browser/profileRegistry.js";
 import { ClickStore } from "./store.js";
 
 function randomBetween(min: number, max: number): number {
@@ -413,6 +414,7 @@ async function runDeviceClickEngine(
           // inside runClickJob, so the job dies instead of leaking an open,
           // idle browser window forever.
           await ctx.adsClient.stopBrowser(job.profileId).catch(() => {});
+          releaseProfile(job.profileId);
           return {
             job,
             status: "failed",
@@ -609,6 +611,7 @@ async function runDeviceClickEngine(
         logger.warn({ device, stuck }, "drain timeout — force-closing in-flight browsers");
         for (const pid of stuck) {
           await ctx.adsClient.stopBrowser(pid).catch(() => {});
+          releaseProfile(pid);
           runningProfiles.delete(pid);
           failed++;
           bumpShared("failed");
