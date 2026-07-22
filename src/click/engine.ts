@@ -413,13 +413,13 @@ async function runDeviceClickEngine(
     try {
       // Hard watchdog: a job stuck pre-browser (CDP attach / API hang) would
       // otherwise block the scheduler AND the cancel drain forever (seen live:
-      // 4 jobs frozen 30+ min with no browser open). 12 minutes is generous —
-      // warm-up + report + click normally fit in ~4.
-      const JOB_HARD_TIMEOUT_MS = 12 * 60 * 1000;
+      // 4 jobs frozen 30+ min with no browser open). 8 minutes is generous —
+      // warm-up + report + click + CF solve normally fit in ~4-5.
+      const JOB_HARD_TIMEOUT_MS = 8 * 60 * 1000;
       const result = await Promise.race([
         runClickJob(ctx, job),
         sleep(JOB_HARD_TIMEOUT_MS).then(async (): Promise<ClickResult> => {
-          logger.error({ jobId: job.id, profileId: job.profileId, domain: job.targetDomain }, "click job hard timeout (12m) — force-closing stuck browser");
+          logger.error({ jobId: job.id, profileId: job.profileId, domain: job.targetDomain }, "click job hard timeout (8m) — force-closing stuck browser");
           // Kill the wedged browser via the AdsPower HTTP API (same escape hatch
           // as the cancel-drain path below). This rejects the hung CDP promises
           // inside runClickJob, so the job dies instead of leaking an open,
@@ -429,7 +429,7 @@ async function runDeviceClickEngine(
           return {
             job,
             status: "failed",
-            error: "hard timeout 12m — job reaped (stuck pre/post browser)",
+            error: "hard timeout 8m — job reaped (stuck pre/post browser)",
             capturedAt: new Date().toISOString(),
             evidence: {
               serpUrl: null, adTitle: null, adDescription: null, displayUrl: null,

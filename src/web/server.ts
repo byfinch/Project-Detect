@@ -1669,7 +1669,7 @@ export function createWebServer(port: number): void {
    * stop any pool browser that is still open — idle browsers are pure load.
    */
   function startIdleProfileReaper(): void {
-    const INTERVAL_MS = 10 * 60 * 1000;
+    const INTERVAL_MS = 5 * 60 * 1000;
     const SHOT_TTL_MS = 5 * 24 * 60 * 60 * 1000; // screenshots older than 5 days are deleted
 
     /** Recursively delete screenshot files older than TTL (+ now-empty dirs). */
