@@ -5,9 +5,9 @@ After=network.target
 [Service]
 Type=simple
 User=detect
-WorkingDirectory=/opt/project-detect
+WorkingDirectory=/opt/project-detect/app
 Environment=NODE_ENV=production
-EnvironmentFile=/opt/project-detect/.env
+EnvironmentFile=/opt/project-detect/app/.env
 ExecStart=/usr/bin/node dist/index.js web -p 3000
 Restart=always
 RestartSec=10
@@ -15,7 +15,7 @@ RestartSec=10
 MemoryMax=10G
 NoNewPrivileges=true
 ProtectSystem=full
-ReadWritePaths=/opt/project-detect
+ReadWritePaths=/opt/project-detect/app
 
 [Install]
 WantedBy=multi-user.target
