@@ -129,6 +129,11 @@ function trDateFromParts(p: { year: number; month: number; day: number; hour: nu
   return new Date(iso);
 }
 
+/** HH:MM in Europe/Istanbul — server TZ is UTC on the VPS, so toLocale* needs an explicit zone. */
+function trTimeHHMM(d: Date): string {
+  return d.toLocaleTimeString("tr-TR", { timeZone: "Europe/Istanbul", hour: "2-digit", minute: "2-digit" });
+}
+
 function getNextScheduledSlot(from = new Date()): Date {
   const tr = trDateParts(from);
   const dayStart = trDateFromParts({ year: tr.year, month: tr.month, day: tr.day, hour: 0, minute: 0 });
@@ -1117,7 +1122,7 @@ export function createWebServer(port: number): void {
 
       ws.mergeCells("A2:H2");
       const filters = [kw && `keyword: ${kw}`, dom && `domain: ${dom}`, op && `operasyon: ${op}`].filter(Boolean).join(" · ") || "tümü";
-      ws.getCell("A2").value = `Detect Ops Center · üretim: ${new Date().toLocaleString("tr-TR")} · filtre: ${filters} · kayıt: ${rows.length}`;
+      ws.getCell("A2").value = `Detect Ops Center · üretim: ${new Date().toLocaleString("tr-TR", { timeZone: "Europe/Istanbul" })} · filtre: ${filters} · kayıt: ${rows.length}`;
       ws.getCell("A2").font = { size: 10, color: { argb: "FF636E7D" } };
       ws.getRow(2).height = 16;
       ws.getRow(3).height = 6;
@@ -1250,7 +1255,7 @@ export function createWebServer(port: number): void {
       enabled: scheduledScan.enabled,
       nextAt: scheduledScan.nextAt,
       message: scheduledScan.enabled
-        ? `Otomatik tarama açıldı · sıradaki slot: ${new Date(scheduledScan.nextAt ?? Date.now()).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}`
+        ? `Otomatik tarama açıldı · sıradaki slot: ${trTimeHHMM(new Date(scheduledScan.nextAt ?? Date.now()))}`
         : "Otomatik tarama kapatıldı",
     });
     res.json({ ok: true, enabled: scheduledScan.enabled, nextAt: scheduledScan.nextAt });
@@ -1595,7 +1600,7 @@ export function createWebServer(port: number): void {
           Array.from(jobs.values()).some((j) => j.type === "click" && j.status === "running");
         if (clickOpRunning) {
           scheduledScan.nextAt = getNextScheduledSlot(new Date(slot.getTime() + 60_000)).toISOString();
-          const nextHH = new Date(scheduledScan.nextAt).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" });
+          const nextHH = trTimeHHMM(new Date(scheduledScan.nextAt));
           logger.info({ deferredFrom: slot, nextAt: scheduledScan.nextAt }, "scheduled scan deferred — click operation running");
           emitEvent({
             type: "scheduled-scan-deferred",
@@ -1621,7 +1626,7 @@ export function createWebServer(port: number): void {
             type: "scheduled-scan-queued",
             jobId,
             nextAt: scheduledScan.nextAt,
-            message: `Zamanlanmış tarama kuyruğa alındı · sonraki: ${new Date(scheduledScan.nextAt).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}`,
+            message: `Zamanlanmış tarama kuyruğa alındı · sonraki: ${trTimeHHMM(new Date(scheduledScan.nextAt))}`,
           });
           logger.info({ jobId, nextAt: scheduledScan.nextAt }, "scheduled scan queued");
         } catch (err) {
