@@ -34,9 +34,14 @@ console.log(`probe: keyword="${keyword}" · ${targets.length} profil (${perDevic
 for (const { p, device } of targets) {
   const name = p.name || p.user_id;
   let session;
+  let inUse = false;
   try {
-    await ads.stopBrowser(p.user_id).catch(() => {});
-    await sleep(600);
+    const active = await ads.browserActive(p.user_id).catch(() => null);
+    if (active?.status === "Active") {
+      inUse = true;
+      console.log(`${device.padEnd(7)} ${name}: kullanımda (aktif iş) — atlandı`);
+      continue;
+    }
     const ws = await ads.ensureBrowser(p.user_id);
     session = await BrowserSession.attach(ws);
     await prepareGoogleConsent(session);
@@ -65,7 +70,7 @@ for (const { p, device } of targets) {
   } finally {
     try {
       if (session) await session.detach().catch(() => {});
-      await ads.stopBrowser(p.user_id).catch(() => {});
+      if (!inUse) await ads.stopBrowser(p.user_id).catch(() => {});
     } catch {
       /* best effort */
     }
