@@ -63,9 +63,24 @@
           }),
         });
         if (r.ok) {
-          msg.textContent = "erişim onaylandı → yönlendiriliyor";
+          msg.textContent = "erişim onaylandı → veriler yükleniyor";
           msg.classList.add("ok");
-          setTimeout(() => (window.location.href = "/"), 350);
+          // Panelin açılışta çektiği verileri önceden yükle; yönlendirme
+          // ancak bunlar bitince (veya 15 sn üst sınır dolunca) yapılır.
+          const warmupPaths = [
+            "/api/ops",
+            "/api/reports/complaints/packs",
+            "/api/ops/results?page=1&limit=5",
+            "/api/scans/paged?page=1&limit=5",
+            "/api/reports/submitted?page=1&limit=5",
+            "/api/kpi/presence?days=14",
+            "/api/profiles/health",
+          ];
+          const warmup = Promise.all(warmupPaths.map((p) => fetch(p).catch(() => null)));
+          const cap = new Promise((res) => setTimeout(res, 15000));
+          await Promise.race([warmup, cap]);
+          msg.textContent = "hazır → yönlendiriliyor";
+          window.location.href = "/";
         } else {
           const e2 = await r.json().catch(() => ({}));
           msg.textContent = e2.error || "erişim reddedildi";
