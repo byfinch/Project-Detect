@@ -323,6 +323,17 @@ async function runDeviceClickEngine(
   let lastHeartbeat = 0;
   let lastHeartbeatKey = "";
 
+  /**
+   * Device circuit breaker: probe runs showed Google often serves ZERO ads to
+   * mobile IPs at night (adsFound=0 while desktop gets the ad). Burning a full
+   * profile open+warm-up per job on an ad-free device is pure waste — after 2
+   * consecutive "target ad not found" skips, remaining jobs of this device leg
+   * are fast-skipped without opening a browser. Fresh per run; the campaign's
+   * next presence scan re-evaluates anyway.
+   */
+  let consecutiveNotFoundSkips = 0;
+  let deviceBlind = false;
+
   function globalDone(): {
     completed: number;
     failed: number;
@@ -445,6 +456,24 @@ async function runDeviceClickEngine(
       } else {
         failed++;
         bumpShared("failed");
+      }
+
+      // Circuit breaker tally (see declaration above).
+      if (result.status === "skipped" && /not found|no href/i.test(result.error || "")) {
+        consecutiveNotFoundSkips++;
+        if (!deviceBlind && consecutiveNotFoundSkips >= 2) {
+          deviceBlind = true;
+          logger.warn({ device, pending: pending.length }, "device blind: SERP ad-free — fast-skipping remaining jobs");
+          onProgress?.({
+            type: "click-progress",
+            runId: ctx.runId,
+            device,
+            phase: "device-blind",
+            message: `${device} · SERP reklamsız görünüyor · kalan ${pending.length} iş profil açmadan geçilecek`,
+          });
+        }
+      } else if (result.status === "success") {
+        consecutiveNotFoundSkips = 0;
       }
 
       // Retry on OTHER profile only — does NOT increase locked total (swap remaining work).
@@ -634,6 +663,48 @@ async function runDeviceClickEngine(
     while (runningProfiles.size < concurrency) {
       const job = pickNextJob();
       if (!job) break;
+      if (deviceBlind) {
+        // Fast-skip: Google isn't serving ads to this device right now —
+        // record the skip without burning a profile open+warm-up cycle.
+        skipped++;
+        bumpShared("skipped");
+        const blindResult: ClickResult = {
+          job,
+          status: "skipped",
+          error: "device blind — SERP reklamsız (hızlı geçiş)",
+          capturedAt: new Date().toISOString(),
+          evidence: {
+            serpUrl: null, adTitle: null, adDescription: null, displayUrl: null,
+            clickUrl: null, landingUrl: null, finalUrl: null, finalDomain: null,
+            redirectHops: [], screenshotSerp: null, screenshotLanding: null,
+            screenshotFinal: null, preClickMs: 0, stayMs: 0, internalClicks: 0,
+          },
+          report: { status: "skipped", message: "device blind" },
+        };
+        results.push(blindResult);
+        ctx.store.insertClick(ctx.runId, blindResult);
+        const g = globalDone();
+        onProgress?.({
+          type: "click-done",
+          jobId: job.id,
+          runId: ctx.runId,
+          domain: job.targetDomain,
+          device: job.device,
+          profileId: job.profileId,
+          status: "skipped",
+          reportStatus: "skipped",
+          reportMessage: "device blind",
+          stayMs: 0,
+          completed: g.completed,
+          failed: g.failed,
+          captcha: g.captcha,
+          skipped: g.skipped,
+          total: lockedTotal,
+          remaining: Math.max(0, lockedTotal - g.done),
+          message: `tık skipped · reklamsız cihaz (hızlı) · ${job.targetDomain} · ${job.device} (${Math.min(g.done, lockedTotal)}/${lockedTotal})`,
+        });
+        continue;
+      }
       void executeJob(job);
     }
     emitHeartbeat();
