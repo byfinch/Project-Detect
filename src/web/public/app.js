@@ -293,8 +293,15 @@ async function refresh() {
     renderProof(proofRes);
     renderHealth(healthRes);
 
-    const locked = isScanRunningFromOps || Date.now() < scanStartLockUntil;
-    const reason = ops.scheduledScan?.scanRunning ? "Zamanlanmış tarama devam ediyor" : isScanRunningFromOps ? "Taranıyor…" : "";
+    const clickOpRunning = (ops.jobs || []).some((j) => j.type === "click" && j.status === "running");
+    const locked = isScanRunningFromOps || clickOpRunning || Date.now() < scanStartLockUntil;
+    const reason = clickOpRunning
+      ? "Tıklama operasyonu sürüyor"
+      : ops.scheduledScan?.scanRunning
+        ? "Zamanlanmış tarama devam ediyor"
+        : isScanRunningFromOps
+          ? "Taranıyor…"
+          : "";
     setScanButtonLocked(locked, reason);
   } catch (err) {
     log("err", `refresh: ${err.message}`);

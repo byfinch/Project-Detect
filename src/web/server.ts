@@ -1366,6 +1366,15 @@ export function createWebServer(port: number): void {
     auto?: boolean;
     scheduled?: boolean;
   }): string {
+    // Load guard: a scan during an active click campaign would double the
+    // browser load and muddle presence data (the campaign already re-scans
+    // inside its own 2h windows via runScan, unaffected by this guard).
+    if (
+      activeCampaign?.status === "running" ||
+      Array.from(jobs.values()).some((j) => j.type === "click" && j.status === "running")
+    ) {
+      throw new Error("Tıklama operasyonu sürüyor — bitince tarama başlatabilirsin");
+    }
     // DB-level guard: two Node processes or a race inside the same process
     // must not start parallel scans against the same SQLite DB.
     try {
