@@ -320,6 +320,7 @@ async function runDeviceClickEngine(
   let captchaBlocked = 0;
   let skipped = 0;
   let lastHeartbeat = 0;
+  let lastHeartbeatKey = "";
 
   function globalDone(): {
     completed: number;
@@ -350,9 +351,14 @@ async function runDeviceClickEngine(
 
   function emitHeartbeat(force = false): void {
     const now = Date.now();
-    if (!force && now - lastHeartbeat < 2500) return;
-    lastHeartbeat = now;
     const g = globalDone();
+    const key = `${g.done}/${runningProfiles.size}/${pending.length}`;
+    // Spam guard: meaningful changes emit instantly (also when forced by job
+    // start/finish); an unchanged state gets at most one keepalive per 30s
+    // instead of flooding the terminal every 2.5s per device leg.
+    if (!force && key === lastHeartbeatKey && now - lastHeartbeat < 30_000) return;
+    lastHeartbeat = now;
+    lastHeartbeatKey = key;
     const remaining = Math.max(0, lockedTotal - g.done);
     const queueLeft = pending.length + runningProfiles.size; // kalan iş: kuyruk + aktif
     onProgress?.({
@@ -400,8 +406,13 @@ async function runDeviceClickEngine(
       const JOB_HARD_TIMEOUT_MS = 12 * 60 * 1000;
       const result = await Promise.race([
         runClickJob(ctx, job),
-        sleep(JOB_HARD_TIMEOUT_MS).then((): ClickResult => {
-          logger.error({ jobId: job.id, profileId: job.profileId, domain: job.targetDomain }, "click job hard timeout (12m) — reaping stuck job");
+        sleep(JOB_HARD_TIMEOUT_MS).then(async (): Promise<ClickResult> => {
+          logger.error({ jobId: job.id, profileId: job.profileId, domain: job.targetDomain }, "click job hard timeout (12m) — force-closing stuck browser");
+          // Kill the wedged browser via the AdsPower HTTP API (same escape hatch
+          // as the cancel-drain path below). This rejects the hung CDP promises
+          // inside runClickJob, so the job dies instead of leaking an open,
+          // idle browser window forever.
+          await ctx.adsClient.stopBrowser(job.profileId).catch(() => {});
           return {
             job,
             status: "failed",

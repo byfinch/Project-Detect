@@ -71,7 +71,10 @@ async function loadServerLogs() {
       level: eventLevel(l.type),
       msg: l.message,
     }));
-    logs = items.slice(-LOG_MAX);
+    // Server buffer is chronological (oldest → newest); the live log() path
+    // unshifts newest-first. Reverse here or the initial history renders
+    // upside-down under the live entries.
+    logs = items.slice(-LOG_MAX).reverse();
     renderLogs();
   } catch {
     /* SSE will fill in */
