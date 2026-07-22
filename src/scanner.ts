@@ -48,14 +48,19 @@ export class ScanStepTimeoutError extends Error {
   }
 }
 
-function withScanStepCap<T>(p: Promise<T>, what: string, ms = SCAN_STEP_HARD_CAP_MS): Promise<T> {
+function withScanStepCap<T>(p: Promise<T>, what: string, onTimeout?: () => void, ms = SCAN_STEP_HARD_CAP_MS): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   return Promise.race([
     p.finally(() => {
       if (timer) clearTimeout(timer);
     }),
     new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new ScanStepTimeoutError(`${what} — hard timeout (${Math.round(ms / 60000)}m)`)), ms);
+      timer = setTimeout(() => {
+        // Let the caller mark its state before the rejection lands, so a
+        // still-running zombie step can be detected and cleaned up.
+        onTimeout?.();
+        reject(new ScanStepTimeoutError(`${what} — hard timeout (${Math.round(ms / 60000)}m)`));
+      }, ms);
     }),
   ]);
 }
@@ -610,6 +615,8 @@ interface WorkerState {
   session: BrowserSession | null;
   profileId: string | null;
   queriesOnProfile: number;
+  /** Set when a withScanStepCap timeout fired mid-openNext — the zombie must not claim state. */
+  timedOut?: boolean;
 }
 
 interface SwarmTarget {
@@ -756,6 +763,7 @@ async function runDeviceScan(
             "trend warm-up solver failed — cooldown (skip brand this session)"
           );
           hotProfiles.add(candidate);
+          releaseProfile(candidate);
           const { gracefulProfileShutdown } = await import("./browser/shutdown.js");
           await gracefulProfileShutdown(ads, session, candidate);
           continue;
@@ -794,12 +802,20 @@ async function runDeviceScan(
           trustMethod: warm.method,
         });
         markProfileInUse(candidate);
+        // The step cap already fired while we were opening — do not claim the
+        // worker state (a zombie assignment would orphan the browser).
+        if (state.timedOut) {
+          const { gracefulProfileShutdown } = await import("./browser/shutdown.js");
+          await gracefulProfileShutdown(ads, session, candidate).catch(() => {});
+          releaseProfile(candidate);
+          return false;
+        }
         return true;
       } catch (err) {
         logger.warn({ device, profileId: candidate, err: String(err) }, "profile start failed, trying next");
         releaseProfile(candidate);
         const { gracefulProfileShutdown } = await import("./browser/shutdown.js");
-        await withScanStepCap(gracefulProfileShutdown(ads, session ?? null, candidate), `close failed profile ${candidate}`, PROFILE_CLOSE_CAP_MS).catch(
+        await withScanStepCap(gracefulProfileShutdown(ads, session ?? null, candidate), `close failed profile ${candidate}`, undefined, PROFILE_CLOSE_CAP_MS).catch(
           async (closeErr) => {
             logger.error({ device, profileId: candidate, err: String(closeErr) }, "graceful close wedged — force-killing via AdsPower API");
             await ads.stopBrowser(candidate).catch(() => {});
@@ -820,7 +836,7 @@ async function runDeviceScan(
         // handshake (seen live: mobile leg frozen 4h right at this line). After
         // 60s, kill the browser through the AdsPower HTTP API — that channel
         // does not depend on the stuck renderer.
-        await withScanStepCap(gracefulProfileShutdown(ads, state.session, pid), `close profile ${pid}`, PROFILE_CLOSE_CAP_MS).catch(
+        await withScanStepCap(gracefulProfileShutdown(ads, state.session, pid), `close profile ${pid}`, undefined, PROFILE_CLOSE_CAP_MS).catch(
           async (err) => {
             logger.error({ device, profileId: pid, err: String(err) }, "graceful close wedged — force-killing via AdsPower API");
             await ads.stopBrowser(pid).catch(() => {});
@@ -867,7 +883,11 @@ async function runDeviceScan(
       const state: WorkerState = { session: null, profileId: null, queriesOnProfile: 0 };
       // Force this profile next (pickCandidate respects hot set).
       poolIdx = pool.ids.indexOf(profileId);
-      const ok = await withScanStepCap(openNext(state, signal), `profile open (${pnameHint})`).catch(async (err) => {
+      const ok = await withScanStepCap(openNext(state, signal), `profile open (${pnameHint})`, () => {
+        state.timedOut = true;
+      }).catch(async (err) => {
+        // Scan-level abort must propagate — swallowing it traps the scan here.
+        if (signal?.aborted) throw err;
         logger.error({ device, profileId, err: String(err) }, "profile open wedged — closing and skipping");
         await closeState(state).catch(() => {});
         return false;
@@ -1156,7 +1176,9 @@ async function runDeviceScan(
               profileOpenController.abort(new Error("profile open timeout"));
             }, 90_000);
             try {
-              ok = await withScanStepCap(openNext(state, profileOpenController.signal), "profile open");
+              ok = await withScanStepCap(openNext(state, profileOpenController.signal), "profile open", () => {
+                state.timedOut = true;
+              });
             } catch (err) {
               logger.warn({ device, worker: w, profileId: state.profileId, err: String(err) }, "openNext failed or aborted");
               ok = false;
@@ -1196,8 +1218,11 @@ async function runDeviceScan(
                   { device, keyword, profileId: state.profileId, ipTry, max: keywordIpRetries },
                   "hard-block — retrying keyword on another IP"
                 );
-                sharedQueue.unshift(keyword);
-                const ok = await withScanStepCap(openNext(state, signal), "profile reopen").catch(() => false);
+                // No sharedQueue.unshift here — the ipTry loop itself retries
+                // this keyword on the fresh IP; requeueing would double-scan it.
+                const ok = await withScanStepCap(openNext(state, signal), "profile reopen", () => {
+                  state.timedOut = true;
+                }).catch(() => false);
                 if (!ok) {
                   await closeState(state);
                   return;
@@ -1262,26 +1287,23 @@ async function runDeviceScan(
                     });
                   } catch (err) {
                     if (err instanceof InlineClickTimeoutError) {
-                      // Wedged renderer/CDP — kill the session, reopen a fresh
-                      // profile (openNext closes the old browser, which rejects
-                      // the hung protocol calls) and requeue the keyword.
-                      logger.error({ device, keyword, profileId: state.profileId, err: String(err) }, "inline click WEDGED — reopening profile");
+                      // Wedged renderer/CDP. The keyword was already scanned
+                      // (ads found, results inserted) — rescanning would only
+                      // duplicate rows. Burn the profile and let the
+                      // queriesOnProfile check at the top of the while loop
+                      // close/reopen it.
+                      logger.error({ device, keyword, profileId: state.profileId, err: String(err) }, "inline click WEDGED — burning profile, keyword kept as done");
                       onProgress?.({
                         type: "scan-progress",
                         device,
                         keyword,
                         phase: "inline-click-timeout",
-                        message: "Inline tık kilitlendi · profil yenilenip keyword tekrar kuyruğa alınıyor",
+                        message: "Inline tık kilitlendi · profil yenileniyor (keyword tamamlandı sayıldı)",
                       });
                       if (state.profileId) hotProfiles.add(state.profileId);
                       state.queriesOnProfile = queriesPerProfile;
-                      sharedQueue.unshift(keyword);
-                      const ok = await withScanStepCap(openNext(state, signal), "profile reopen").catch(() => false);
-                      if (!ok) {
-                        await closeState(state);
-                        return;
-                      }
-                      continue;
+                      keywordDone = true;
+                      break;
                     }
                     logger.warn({ device, err: String(err) }, "inline click failed (shared queue)");
                   }
@@ -1291,8 +1313,11 @@ async function runDeviceScan(
               logger.error({ device, keyword, profileId: state.profileId, err: String(err) }, "keyword scan failed");
               if (state.profileId) hotProfiles.add(state.profileId);
               state.queriesOnProfile = queriesPerProfile;
-              sharedQueue.unshift(keyword);
-              const ok = await withScanStepCap(openNext(state, signal), "profile reopen").catch(() => false);
+              // No sharedQueue.unshift here — the ipTry loop handles retries;
+              // requeueing caused duplicate rows and captcha ping-pong.
+              const ok = await withScanStepCap(openNext(state, signal), "profile reopen", () => {
+                state.timedOut = true;
+              }).catch(() => false);
               if (!ok) {
                 await closeState(state);
                 return;

@@ -115,6 +115,7 @@ export class EmailPool {
   private db: DatabaseSync;
   private client = new MailTmClient();
   private refilling = false;
+  private closed = false;
 
   constructor(outputDir: string) {
     const dbPath = resolve(outputDir, "detect.sqlite");
@@ -229,6 +230,7 @@ export class EmailPool {
   }
 
   close(): void {
+    this.closed = true;
     try {
       this.db.close();
     } catch {
@@ -246,6 +248,11 @@ export class EmailPool {
       )
       .get() as Record<string, unknown> | undefined;
     if (!row) return null;
+    // Consume immediately, in the same sync block as the pick — otherwise two
+    // parallel reports can acquire the SAME address before markUsed runs.
+    this.db
+      .prepare(`UPDATE email_pool SET last_used_at = ?, use_count = use_count + 1 WHERE address = ?`)
+      .run(new Date().toISOString(), String(row.address));
     return this.mapRow(row);
   }
 
@@ -257,10 +264,12 @@ export class EmailPool {
     });
   }
 
+  /**
+   * @deprecated Consumption now happens inside acquire() (optimistic, race-free).
+   * Kept as a no-op so older callers don't double-count.
+   */
   markUsed(address: string): void {
-    this.db
-      .prepare(`UPDATE email_pool SET use_count = use_count + 1, last_used_at = ? WHERE address = ?`)
-      .run(new Date().toISOString(), address);
+    void address;
   }
 
   disable(address: string): void {
@@ -283,17 +292,23 @@ export class EmailPool {
     try {
       let need = Math.max(0, targetSize - this.activeCount());
       while (need > 0) {
+        if (this.closed) break;
         try {
           const acc = await this.client.createAccount();
-          this.db
+          const info = this.db
             .prepare(
               `INSERT OR IGNORE INTO email_pool (address, password, provider, mailtm_id, created_at)
                VALUES (?, ?, 'mailtm', ?, ?)`
             )
             .run(acc.address, acc.password, acc.id, new Date().toISOString());
-          created++;
-          need--;
-          logger.info({ address: acc.address, poolActive: this.activeCount() }, "email pool: account created");
+          // INSERT OR IGNORE: only count a real insert — a conflict is neither
+          // created nor failed, just a wasted API call.
+          if (Number(info.changes) > 0) {
+            created++;
+            need--;
+            failed = 0;
+            logger.info({ address: acc.address, poolActive: this.activeCount() }, "email pool: account created");
+          }
         } catch (err) {
           failed++;
           logger.warn({ err: String(err) }, "email pool: account creation failed");

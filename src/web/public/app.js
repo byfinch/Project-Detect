@@ -157,7 +157,7 @@ function renderScans(data) {
 
 window.changeScansPage = (delta) => {
   scansPage += delta;
-  refresh();
+  refresh(true);
 };
 
 function renderJobs(jobs) {
@@ -256,9 +256,15 @@ function updateOps(ops) {
 }
 
 let refreshInFlight = false;
+let lastRefreshAt = 0;
 
-async function refresh() {
+async function refresh(force = false) {
   if (refreshInFlight) return; // pager double-click guard — no parallel fetches
+  // Throttle event-driven refreshes (SSE click-done storms); explicit UI
+  // actions (init, pager, submit) pass force=true to bypass.
+  const now = Date.now();
+  if (!force && now - lastRefreshAt < 3000) return;
+  lastRefreshAt = now;
   refreshInFlight = true;
   document.querySelectorAll(".pager-btn").forEach((b) => b.classList.add("loading"));
   try {
@@ -332,7 +338,7 @@ async function onScanSubmit(e) {
     const res = await API.post("/api/scans/start", { brands, devices, expandBrands: expand, clearProfile: false });
     document.getElementById("scan-form-msg").textContent = `Kuyruğa alındı · ${res.jobId}`;
     log("info", `scan kuyruğa alındı · ${brands.join(", ")} · ${res.jobId}`);
-    await refresh();
+    await refresh(true);
   } catch (err) {
     document.getElementById("scan-form-msg").textContent = err.message;
     log("err", `scan hata: ${err.message}`);
@@ -355,7 +361,7 @@ async function stopFocus() {
   try {
     await API.post("/api/campaign/stop", {});
     log("warn", "focus durduruluyor");
-    await refresh();
+    await refresh(true);
   } catch (err) {
     log("err", `focus durdurma: ${err.message}`);
     focusStopping = false;
@@ -420,7 +426,7 @@ function renderOpResultsPager(total, page, limit) {
       const next = Number((e.currentTarget).dataset.page);
       if (next >= 1 && next <= totalPages) {
         opResultsPage = next;
-        refresh();
+        refresh(true);
       }
     });
   });
@@ -503,7 +509,7 @@ function renderProofPager(total, page, limit) {
       const next = Number(e.currentTarget.dataset.page);
       if (next >= 1 && next <= totalPages) {
         proofPage = next;
-        refresh();
+        refresh(true);
       }
     });
   });
@@ -563,7 +569,7 @@ function init() {
   document.getElementById("scheduled-enabled")?.addEventListener("change", async (e) => {
     try {
       await API.post("/api/scheduled-scan/enabled", { enabled: e.target.checked });
-      refresh();
+      refresh(true);
     } catch (err) {
       log("err", `otomatik tarama: ${err.message}`);
     }
@@ -572,7 +578,7 @@ function init() {
     proofPage = 1;
     const exportBtn = document.getElementById("proof-export");
     if (exportBtn) exportBtn.href = `/api/reports/submitted/export?${proofFilterQs().replace(/^&/, "")}`;
-    refresh();
+    refresh(true);
   });
   document.getElementById("btn-stop-focus").addEventListener("click", stopFocus);
   const logoutBtn = document.getElementById("btn-logout");
@@ -583,7 +589,7 @@ function init() {
     });
   }
   setupSSE();
-  refresh();
+  refresh(true);
   setInterval(refresh, 10000);
 }
 

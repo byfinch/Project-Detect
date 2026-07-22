@@ -338,12 +338,12 @@ async function runDeviceClickEngine(
    * Tail watchdog: when the queue is drained and only stragglers remain, the
    * freed slots have no work left — one wedged tail job holds the whole wave
    * (and the campaign's next wave) hostage. Healthy jobs run ~30-90s, so any
-   * job older than 2m with an empty queue is force-closed. forceClosed guards
+   * job older than 4m with an empty queue is force-closed. forceClosed guards
    * against double counting when the killed job's own promise rejects later.
    */
   const runningSince = new Map<string, number>();
   const forceClosed = new Set<string>();
-  const TAIL_JOB_MAX_MS = 2 * 60 * 1000; // healthy jobs run ~30-90s; >2m with an empty queue = wedge
+  const TAIL_JOB_MAX_MS = 4 * 60 * 1000; // healthy jobs run ~30-90s; >4m with an empty queue = wedge
 
   function globalDone(): {
     completed: number;
@@ -402,6 +402,9 @@ async function runDeviceClickEngine(
 
   async function executeJob(job: ClickJob): Promise<void> {
     runningProfiles.add(job.profileId);
+    // Reset stale force-close flag: the same profile may run a later job after
+    // a tail watchdog kill — without this its result would be silently dropped.
+    forceClosed.delete(job.profileId);
     runningSince.set(job.profileId, Date.now());
     {
       const g = globalDone();
@@ -428,9 +431,10 @@ async function runDeviceClickEngine(
       // 4 jobs frozen 30+ min with no browser open). 8 minutes is generous —
       // warm-up + report + click + CF solve normally fit in ~4-5.
       const JOB_HARD_TIMEOUT_MS = 8 * 60 * 1000;
-      const result = await Promise.race([
-        runClickJob(ctx, job),
-        sleep(JOB_HARD_TIMEOUT_MS).then(async (): Promise<ClickResult> => {
+      const jobPromise = runClickJob(ctx, job);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeoutP = new Promise<ClickResult>((res) => {
+        timer = setTimeout(async () => {
           logger.error({ jobId: job.id, profileId: job.profileId, domain: job.targetDomain }, "click job hard timeout (8m) — force-closing stuck browser");
           // Kill the wedged browser via the AdsPower HTTP API (same escape hatch
           // as the cancel-drain path below). This rejects the hung CDP promises
@@ -438,7 +442,7 @@ async function runDeviceClickEngine(
           // idle browser window forever.
           await ctx.adsClient.stopBrowser(job.profileId).catch(() => {});
           releaseProfile(job.profileId);
-          return {
+          res({
             job,
             status: "failed",
             error: "hard timeout 8m — job reaped (stuck pre/post browser)",
@@ -450,9 +454,20 @@ async function runDeviceClickEngine(
               screenshotFinal: null, preClickMs: 0, stayMs: 0, internalClicks: 0,
             },
             report: { status: "error", message: "hard timeout" },
-          };
-        }),
-      ]);
+          });
+        }, JOB_HARD_TIMEOUT_MS);
+      });
+      let result: ClickResult;
+      try {
+        result = await Promise.race([jobPromise, timeoutP]);
+      } finally {
+        // Cancel the watchdog whichever side won — otherwise a cleared timer
+        // fires 8m later and kills a healthy new job's browser on this profile.
+        clearTimeout(timer);
+        // If the timeout won, the job's own promise may reject later (browser
+        // killed under it) — swallow that zombie rejection instead of crashing.
+        jobPromise.catch(() => {});
+      }
       if (forceClosed.has(job.profileId)) return; // tail watchdog already counted this job
       results.push(result);
       ctx.store.insertClick(ctx.runId, result);
@@ -498,7 +513,7 @@ async function runDeviceClickEngine(
         const g = globalDone();
         // Budget check: pending + in-flight (minus THIS job, still counted in both)
         const inFlight = pending.length + runningProfiles.size - 1;
-        if (g.done + inFlight <= lockedTotal) {
+        if (g.done + inFlight < lockedTotal) {
           const alt = profileIds.find((id) => id !== job.profileId && !runningProfiles.has(id));
           if (alt) {
             const retry: ClickJob = {
@@ -577,6 +592,27 @@ async function runDeviceClickEngine(
       logger.error({ jobId: job.id, err: String(err) }, "unexpected click job error");
       failed++;
       bumpShared("failed");
+      // Record the failure in the store too — otherwise counters and the
+      // clicks table disagree (job counted as failed but never persisted).
+      const errResult: ClickResult = {
+        job,
+        status: "failed",
+        error: String(err),
+        capturedAt: new Date().toISOString(),
+        evidence: {
+          serpUrl: null, adTitle: null, adDescription: null, displayUrl: null,
+          clickUrl: null, landingUrl: null, finalUrl: null, finalDomain: null,
+          redirectHops: [], screenshotSerp: null, screenshotLanding: null,
+          screenshotFinal: null, preClickMs: 0, stayMs: 0, internalClicks: 0,
+        },
+        report: { status: "error", message: "unexpected error" },
+      };
+      results.push(errResult);
+      try {
+        ctx.store.insertClick(ctx.runId, errResult);
+      } catch {
+        /* non-fatal */
+      }
       const g = globalDone();
       onProgress?.({
         type: "click-done",
@@ -654,6 +690,8 @@ async function runDeviceClickEngine(
         const stuck = [...runningProfiles];
         logger.warn({ device, stuck }, "drain timeout — force-closing in-flight browsers");
         for (const pid of stuck) {
+          // Mark force-closed so the job's own late rejection is not double-counted.
+          forceClosed.add(pid);
           await ctx.adsClient.stopBrowser(pid).catch(() => {});
           releaseProfile(pid);
           runningProfiles.delete(pid);
@@ -697,7 +735,11 @@ async function runDeviceClickEngine(
           report: { status: "skipped", message: "device blind" },
         };
         results.push(blindResult);
-        ctx.store.insertClick(ctx.runId, blindResult);
+        try {
+          ctx.store.insertClick(ctx.runId, blindResult);
+        } catch {
+          /* store hiccup must not take down the whole device leg */
+        }
         const g = globalDone();
         onProgress?.({
           type: "click-done",
@@ -723,7 +765,7 @@ async function runDeviceClickEngine(
       void executeJob(job);
     }
     // Tail watchdog: queue drained, only stragglers left — healthy jobs run
-    // ~30-90s, so anything older than 2m with an empty queue is a wedge
+    // ~30-90s, so anything older than 4m with an empty queue is a wedge
     // holding the next wave hostage. Force-close it and let the run finish.
     if (pending.length === 0) {
       for (const pid of [...runningProfiles]) {
@@ -731,7 +773,7 @@ async function runDeviceClickEngine(
         const since = runningSince.get(pid) ?? Date.now();
         if (Date.now() - since > TAIL_JOB_MAX_MS) {
           forceClosed.add(pid);
-          logger.warn({ device, profileId: pid, ageMs: Date.now() - since }, "tail straggler force-closed (queue empty, job > 2m)");
+          logger.warn({ device, profileId: pid, ageMs: Date.now() - since }, "tail straggler force-closed (queue empty, job > 4m)");
           await ctx.adsClient.stopBrowser(pid).catch(() => {});
           releaseProfile(pid);
           runningProfiles.delete(pid);
@@ -743,7 +785,7 @@ async function runDeviceClickEngine(
             runId: ctx.runId,
             device,
             phase: "tail-kill",
-            message: `${device} · kuyruk boş · 2 dk'yı aşan son iş kapatıldı · dalga tamamlanıyor`,
+            message: `${device} · kuyruk boş · 4 dk'yı aşan son iş kapatıldı · dalga tamamlanıyor`,
           });
         }
       }

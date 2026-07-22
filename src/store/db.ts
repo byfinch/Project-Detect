@@ -17,6 +17,8 @@ export class Store {
     this.db = new DatabaseSync(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
+    // Multiple stores share detect.sqlite (ClickStore, Store, pool) — wait for locks.
+    this.db.exec("PRAGMA busy_timeout = 5000;");
     this.migrate();
     this.ipTrust = new IpTrustStore(this.db);
   }

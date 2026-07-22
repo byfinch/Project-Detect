@@ -218,6 +218,9 @@ function applyClickProgress(jobId: string, event: Record<string, unknown>): void
   };
 
   if (event.type === "click-run-created" || event.type === "click-domain-start") {
+    // Focus campaigns write cumulative counters via onState — resetting them
+    // here (and re-locking total to the wave size) would fight that writer.
+    if (state.details?.focus === true) return;
     // Per-domain phase: force new locked total (e.g. 10), do not keep previous 30.
     const total = Number(event.totalJobs ?? event.total ?? 0);
     const domain = String(event.domain ?? state.details?.currentDomain ?? "");
@@ -445,7 +448,8 @@ function startFocusCampaignJob(opts: {
             ? "failed"
             : "completed";
       setJobState(jobId, {
-        status: st,
+        // A panel cancel must survive the engine's natural completion.
+        status: jobs.get(jobId)?.status === "cancelled" ? "cancelled" : st,
         progress: 100,
         message: finalState.message,
         error: finalState.error,
@@ -520,6 +524,8 @@ export function createWebServer(port: number): void {
     const { user, password } = req.body ?? {};
     if (user === PANEL_USER && password === PANEL_PASSWORD) {
       const token = randomBytes(24).toString("hex");
+      // Sweep expired tokens so the map cannot grow unbounded.
+      for (const [t, exp] of sessions) if (exp < Date.now()) sessions.delete(t);
       sessions.set(token, Date.now() + SESSION_TTL_MS);
       res.setHeader(
         "Set-Cookie",
@@ -1353,8 +1359,12 @@ export function createWebServer(port: number): void {
     const cleanBrands = brands
       .map((b: string) => b.trim().toLocaleLowerCase("tr"))
       .filter(Boolean);
-    const jobId = startScanJob({ brands: cleanBrands, devices, concurrency, expandBrands, clearProfile });
-    res.json({ jobId, status: "started" });
+    try {
+      const jobId = startScanJob({ brands: cleanBrands, devices, concurrency, expandBrands, clearProfile });
+      res.json({ jobId, status: "started" });
+    } catch (err) {
+      res.status(409).json({ error: String(err) });
+    }
   });
 
   function startScanJob(opts: {
@@ -1459,7 +1469,7 @@ export function createWebServer(port: number): void {
             if (event.type === "scan-progress" && (event as { phase?: string }).phase === "swarm-locked") {
               const target = (event as { target?: ClickTarget }).target;
               const scanId = Number((event as { scanId?: number }).scanId ?? 0);
-              if (target && scanId && !activeCampaign) {
+              if (target && scanId && !(activeCampaign?.status === "running")) {
                 try {
                   const started = startFocusCampaignJob({ scanId, cfg, auto: true, targetOverride: target });
                   logger.info({ jobId, scanId, domain: started.domain }, "swarm-locked: focus campaign started from scan event");
@@ -1517,6 +1527,10 @@ export function createWebServer(port: number): void {
         } finally {
           scanAbortControllers.delete(jobId);
         }
+
+        // Bail out if the job was cancelled mid-scan — never resurrect it and
+        // never let a cancelled scan auto-start a focus campaign.
+        if (jobs.get(jobId)?.status !== "running") return;
 
         const hasAds = summary.totalAds > 0;
         const postScanMessage = hasAds
@@ -1590,7 +1604,9 @@ export function createWebServer(port: number): void {
         }
       } catch (err) {
         const msg = String(err);
-        setJobState(jobId, { status: "failed", message: msg, error: msg, finishedAt: new Date().toISOString() });
+        // Do not overwrite a user-initiated cancel with "failed".
+        const cur = jobs.get(jobId)?.status;
+        setJobState(jobId, { status: cur === "cancelled" ? "cancelled" : "failed", message: msg, error: msg, finishedAt: new Date().toISOString() });
         emitEvent({ type: "scan-failed", jobId, error: msg });
       }
     })();

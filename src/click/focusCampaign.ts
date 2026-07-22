@@ -71,7 +71,9 @@ export function pickTopAdFromScan(
   const bestPos = new Map<string, number>();
   const hits = new Map<string, number>();
   for (const r of rows) {
-    const key = normDomain(String(r.final_domain || r.display_domain || ""));
+    // Key rule must match cloneReport grouping: display_domain takes priority,
+    // otherwise redirect-chain ads never match their rank and a random target wins.
+    const key = normDomain(String(r.display_domain || r.final_domain || ""));
     if (!key || key === "unknown") continue;
     const pos = Number(r.position ?? 99);
     const prev = bestPos.get(key);
@@ -200,12 +202,24 @@ export async function runFocusCampaign(opts: {
 
   const cancelled = () => hooks.isCancelled?.() === true;
 
+  // Plain sleep() can't be interrupted — panel stop would wait minutes.
+  const sleepCancellable = async (ms: number) => {
+    const step = 1000;
+    for (let t = 0; t < ms && !cancelled(); t += step) await sleep(Math.min(step, ms - t));
+  };
+
   try {
     let scanId = opts.scanId;
-    let store = new Store(opts.config.output.dir);
-    state.brands = brandsFromScan(store, scanId);
-    state.devices = devicesFromScan(store, scanId);
-    store.close();
+    {
+      const store = new Store(opts.config.output.dir);
+      try {
+        state.brands = brandsFromScan(store, scanId);
+        state.devices = devicesFromScan(store, scanId);
+      } finally {
+        // SQLite handle must close even on throw, otherwise it leaks.
+        store.close();
+      }
+    }
 
     if (!state.brands.length) {
       throw new Error("Scan marka listesi boş — focus kampanya başlatılamaz");
@@ -213,12 +227,20 @@ export async function runFocusCampaign(opts: {
 
     // Outer loop: 2h windows until cancel or no ads.
     while (!cancelled()) {
-      store = new Store(opts.config.output.dir);
-      const top = opts.targetOverride
-        ? { target: opts.targetOverride, bestPosition: 1, reason: `Swarm hedefi · ${opts.targetOverride.domain} · ${opts.targetOverride.targetDevice}` }
-        : pickTopAdFromScan(store, scanId, mode);
-      const allTargets = opts.targetOverride ? [opts.targetOverride] : buildTargetsFromScan(store, scanId, { mode });
-      store.close();
+      let top: ReturnType<typeof pickTopAdFromScan>;
+      let allTargets: ClickTarget[];
+      {
+        const store = new Store(opts.config.output.dir);
+        try {
+          top = opts.targetOverride
+            ? { target: opts.targetOverride, bestPosition: 1, reason: `Swarm hedefi · ${opts.targetOverride.domain} · ${opts.targetOverride.targetDevice}` }
+            : pickTopAdFromScan(store, scanId, mode);
+          allTargets = opts.targetOverride ? [opts.targetOverride] : buildTargetsFromScan(store, scanId, { mode });
+        } finally {
+          // SQLite handle must close even on throw, otherwise it leaks.
+          store.close();
+        }
+      }
 
       if (!top && !allTargets.length) {
         state.message = "Tarama sonucu reklam yok — kampanya durdu";
@@ -276,6 +298,7 @@ export async function runFocusCampaign(opts: {
       });
 
       // Inner loop: click waves on THIS domain only until window ends.
+      let consecutiveWaveErrors = 0;
       const imp = picked.target.impressions ?? [];
       const budget = waveBudget(picked.target.targetDevice, {
         mobileHits: imp.filter((i) => i.device === "mobile").length,
@@ -323,6 +346,7 @@ export async function runFocusCampaign(opts: {
           state.completedClicks += summary.completedJobs;
           state.failedClicks += summary.failedJobs;
           state.skippedClicks += summary.skippedJobs;
+          consecutiveWaveErrors = 0;
           publish(
             `Dalga ${state.wave} bitti · ${picked.target.domain} · +${summary.completedJobs} ok · toplam ok=${state.completedClicks}`
           );
@@ -330,18 +354,23 @@ export async function runFocusCampaign(opts: {
           const msg = String(err);
           logger.warn({ err: msg, domain: picked.target.domain }, "focus wave failed");
           // All profiles cooling → long wait, no point hammering failed waves.
-          const coolWait = /cooling/i.test(msg) ? 300_000 : 5_000;
+          // Other errors (e.g. AdsPower down) → exponential backoff, otherwise a
+          // 5s+8s loop hammers the API until the window ends.
+          const isCooling = /cooling/i.test(msg);
+          const coolWait = isCooling
+            ? 300_000
+            : Math.min(300_000, 5_000 * 2 ** ++consecutiveWaveErrors);
           publish(
-            coolWait > 5_000
+            isCooling
               ? `Profiller dinleniyor (frekans limiti) · 5dk sonra yeni dalga · ${picked.target.domain}`
               : `Dalga hata: ${msg.slice(0, 120)}`
           );
-          await sleep(coolWait);
+          await sleepCancellable(coolWait);
         }
 
         // Short gap between waves (avoid hammering API / AdsPower)
         if (Date.now() < windowEndMs && !cancelled()) {
-          await sleep(8000);
+          await sleepCancellable(8000);
         }
       }
 
@@ -418,6 +447,9 @@ export async function runFocusCampaign(opts: {
           totalAds: summary.totalAds,
         });
       } catch (err) {
+        // Panel cancel aborts the rescan — that's not a failure; the outer
+        // loop will mark the campaign 'stopped' anyway.
+        if (cancelled()) { state.error = undefined; break; }
         logger.error({ err: String(err) }, "focus rescan failed");
         state.status = "failed";
         state.error = String(err);

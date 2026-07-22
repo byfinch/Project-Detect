@@ -9,6 +9,8 @@ import { logger } from "../logger.js";
 
 function open(outputDir: string): DatabaseSync {
   const db = new DatabaseSync(resolve(outputDir, "detect.sqlite"));
+  // Multiple stores share detect.sqlite (ClickStore, Store, pool) — wait for locks.
+  db.exec("PRAGMA busy_timeout = 5000;");
   db.exec(`
     CREATE TABLE IF NOT EXISTS solver_calls (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,

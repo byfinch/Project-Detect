@@ -167,6 +167,10 @@ export class AdsPowerClient {
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
       signal: AbortSignal.timeout(15_000),
     });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status}: ${text.slice(0, 120)}`);
+    }
     return (await res.json()) as ApiEnvelope<T>;
   }
 
@@ -175,15 +179,25 @@ export class AdsPowerClient {
     opts: { params?: Record<string, string | number | undefined>; method?: "GET" | "POST"; body?: unknown } = {}
   ): Promise<T> {
     const method = opts.method ?? "GET";
+    // Hard total deadline: the rate-limiter queue (or repeated retries) must not
+    // let a request hang forever while the Local API is wedged.
+    const deadline = Date.now() + 60_000;
     let lastMsg = "unknown error";
     for (let attempt = 1; attempt <= 4; attempt++) {
+      if (Date.now() > deadline) throw new AdsPowerError("request deadline exceeded (60s)", -1, path);
       // Each attempt (incl. retries) goes through the limiter, so retries are spaced >= 1/s too.
       let json: ApiEnvelope<T>;
       try {
         json = await this.limiter.schedule(() => this.fetchOnce<T>(path, { params: opts.params, method, body: opts.body }));
+        if (Date.now() > deadline) throw new Error("AdsPower request deadline exceeded (60s)");
       } catch (err) {
-        lastMsg = `network error: ${String(err)}`;
-        logger.warn({ path, attempt, err: String(err) }, "AdsPower request failed at transport");
+        const msg = String(err);
+        // Past the total deadline (mostly time lost in the limiter queue) — stop.
+        if (msg.includes("deadline exceeded")) throw new AdsPowerError("request deadline exceeded (60s)", -1, path);
+        // 4xx (except 429) is a client error — retrying cannot help.
+        if (/HTTP 4(?!29)\d/.test(msg)) throw new AdsPowerError(msg, -1, path);
+        lastMsg = `network error: ${msg}`;
+        logger.warn({ path, attempt, err: msg }, "AdsPower request failed at transport");
         continue;
       }
       if (json.code === 0) return json.data;
@@ -274,7 +288,10 @@ export class AdsPowerClient {
    * browser if it is already Active, otherwise launching it.
    */
   async ensureBrowser(userId: string, opts: StartOptions = {}): Promise<string> {
-    const active = await this.browserActive(userId).catch(() => null);
+    const active = await this.browserActive(userId).catch((err) => {
+      logger.warn({ err: String(err) }, "browserActive check failed");
+      return null;
+    });
     if (active?.status === "Active" && active.ws?.puppeteer) {
       logger.info({ userId }, "AdsPower profile already active — re-attaching");
       return active.ws.puppeteer;

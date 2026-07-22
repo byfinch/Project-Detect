@@ -25,6 +25,8 @@ export class ClickStore {
     this.db = new DatabaseSync(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
+    // Multiple stores share detect.sqlite (ClickStore, Store, pool) — wait for locks.
+    this.db.exec("PRAGMA busy_timeout = 5000;");
     this.migrate();
   }
 
@@ -228,63 +230,64 @@ export class ClickStore {
 
   insertClick(runId: number, result: ClickResult): number {
     const ev = result.evidence;
-    const info = this.db
-      .prepare(
-        `INSERT INTO clicks
-          (run_id, job_id, profile_id, device, keyword, target_domain, status,
-           serp_url, ad_title, ad_description, display_url, click_url, landing_url,
-           final_url, final_domain, pre_click_ms, stay_ms, internal_clicks,
-           screenshot_serp, screenshot_landing, screenshot_final, error, captured_at,
-           report_status, report_message)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        runId,
-        result.job.id,
-        result.job.profileId,
-        result.job.device,
-        result.job.keyword,
-        result.job.targetDomain,
-        result.status,
-        ev.serpUrl,
-        ev.adTitle,
-        ev.adDescription,
-        ev.displayUrl,
-        ev.clickUrl,
-        ev.landingUrl,
-        ev.finalUrl,
-        ev.finalDomain,
-        ev.preClickMs,
-        ev.stayMs,
-        ev.internalClicks,
-        ev.screenshotSerp,
-        ev.screenshotLanding,
-        ev.screenshotFinal,
-        result.error,
-        result.capturedAt,
-        result.report?.status ?? null,
-        result.report?.message ?? null
-      );
-    const clickId = Number(info.lastInsertRowid);
+    // clicks row + hops in ONE transaction — a hops failure must not leave an
+    // orphaned clicks row behind.
+    this.db.exec("BEGIN");
+    try {
+      const info = this.db
+        .prepare(
+          `INSERT INTO clicks
+            (run_id, job_id, profile_id, device, keyword, target_domain, status,
+             serp_url, ad_title, ad_description, display_url, click_url, landing_url,
+             final_url, final_domain, pre_click_ms, stay_ms, internal_clicks,
+             screenshot_serp, screenshot_landing, screenshot_final, error, captured_at,
+             report_status, report_message)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          runId,
+          result.job.id,
+          result.job.profileId,
+          result.job.device,
+          result.job.keyword,
+          result.job.targetDomain,
+          result.status,
+          ev.serpUrl,
+          ev.adTitle,
+          ev.adDescription,
+          ev.displayUrl,
+          ev.clickUrl,
+          ev.landingUrl,
+          ev.finalUrl,
+          ev.finalDomain,
+          ev.preClickMs,
+          ev.stayMs,
+          ev.internalClicks,
+          ev.screenshotSerp,
+          ev.screenshotLanding,
+          ev.screenshotFinal,
+          result.error,
+          result.capturedAt,
+          result.report?.status ?? null,
+          result.report?.message ?? null
+        );
+      const clickId = Number(info.lastInsertRowid);
 
-    if (ev.redirectHops.length) {
-      const hopStmt = this.db.prepare(
-        `INSERT INTO click_hops (click_id, seq, url, type, status, method, location, at_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      );
-      this.db.exec("BEGIN");
-      try {
+      if (ev.redirectHops.length) {
+        const hopStmt = this.db.prepare(
+          `INSERT INTO click_hops (click_id, seq, url, type, status, method, location, at_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        );
         for (const h of ev.redirectHops) {
           hopStmt.run(clickId, h.seq, h.url, h.type, h.status ?? null, h.method ?? null, h.location ?? null, h.atMs ?? null);
         }
-        this.db.exec("COMMIT");
-      } catch (err) {
-        this.db.exec("ROLLBACK");
-        throw err;
       }
+      this.db.exec("COMMIT");
+      return clickId;
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
     }
-
-    return clickId;
   }
 
   getRun(runId: number): Record<string, unknown> | undefined {

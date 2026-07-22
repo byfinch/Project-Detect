@@ -136,9 +136,10 @@ async function openProfile(ctx: WorkerContext, profileId: string, device: Device
   let session: BrowserSession | null = null;
   try {
     const ws = await ctx.adsClient.ensureBrowser(profileId);
-    session = await BrowserSession.attach(ws);
-    // Mark immediately — the reaper must not kill this browser mid-warm-up.
+    // Mark immediately after ensureBrowser, BEFORE the CDP attach — otherwise
+    // the reaper can kill this browser in the window between the two calls.
     markProfileInUse(profileId);
+    session = await BrowserSession.attach(ws);
     await prepareGoogleConsent(session);
     if (device === "mobile") {
       const { applyMobileEmulation } = await import("../browser/mobileEmulation.js");
