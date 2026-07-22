@@ -357,6 +357,22 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
     // 4. Parse ads and find target.
     const ads = await parseAds(page);
     let targetAd = matchAd(ads, job.targetDomain, job.targetTitle, job.fallbackFirstAd);
+    // Diagnose "target ad not found" waves: did the SERP have no ads at all
+    // (ad simply not served to this IP/device) or did we fail to match it?
+    if (!targetAd) {
+      logger.info(
+        {
+          jobId: job.id,
+          device: job.device,
+          profileId: job.profileId,
+          target: job.targetDomain,
+          adsFound: ads.length,
+          seenDomains: ads.map((a) => a.displayDomain).slice(0, 6),
+          pageUrl: page.url().slice(0, 120),
+        },
+        "click: target ad not on SERP — parsed inventory"
+      );
+    }
 
     if (!targetAd && job.clickFirstResult) {
       targetAd = await firstOrganicResult(page);
