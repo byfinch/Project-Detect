@@ -30,6 +30,35 @@ import { personaFor } from "./util/persona.js";
 /** How many different IPs to try for a keyword that hard-blocks (global default). */
 const KEYWORD_IP_RETRIES = 3;
 
+/**
+ * Hard wall for any single scan step (trend recovery / keyword search).
+ * A wedged renderer makes puppeteer protocol calls hang forever — without a
+ * cap one stuck page froze an entire device leg (seen live). On expiry the
+ * caller's normal error path runs: profile is closed, which rejects the hung
+ * CDP promises, and the scan moves on. 6 minutes is generous — a healthy
+ * keyword pass (nav + parse) fits in ~1.
+ */
+const SCAN_STEP_HARD_CAP_MS = 6 * 60_000;
+
+export class ScanStepTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ScanStepTimeoutError";
+  }
+}
+
+function withScanStepCap<T>(p: Promise<T>, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    p.finally(() => {
+      if (timer) clearTimeout(timer);
+    }),
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new ScanStepTimeoutError(`${what} — hard timeout (6m)`)), SCAN_STEP_HARD_CAP_MS);
+    }),
+  ]);
+}
+
 export interface BettingHit {
   device: string;
   keyword: string;
@@ -818,7 +847,11 @@ async function runDeviceScan(
       const state: WorkerState = { session: null, profileId: null, queriesOnProfile: 0 };
       // Force this profile next (pickCandidate respects hot set).
       poolIdx = pool.ids.indexOf(profileId);
-      const ok = await openNext(state, signal);
+      const ok = await withScanStepCap(openNext(state, signal), `profile open (${pnameHint})`).catch(async (err) => {
+        logger.error({ device, profileId, err: String(err) }, "profile open wedged — closing and skipping");
+        await closeState(state).catch(() => {});
+        return false;
+      });
       if (!ok || state.profileId !== profileId) {
         // openNext may pick another if open failed — if wrong profile, close and skip.
         if (state.profileId && state.profileId !== profileId) {
@@ -873,7 +906,10 @@ async function runDeviceScan(
             const captchaOpts = proxy
               ? { captchaProxy: { proxy: proxy.proxy, proxytype: proxy.proxytype } }
               : {};
-            const safeNav = await recoverViaTrendClick(state.session!, config, captchaOpts);
+            const safeNav = await withScanStepCap(
+              recoverViaTrendClick(state.session!, config, captchaOpts),
+              `safe-trend ${pname}`
+            );
             if (safeNav.captcha && !safeNav.captchaSolved) {
               hotProfiles.add(profileId);
               const cool = ctx.store.ipTrust.markSolverFailed(profileId, "safe-trend blocked");
@@ -911,7 +947,10 @@ async function runDeviceScan(
         }
 
         try {
-          const res = await scanOneKeyword(ctx, state.session!, device, profileId, keyword, proxy, onProgress);
+          const res = await withScanStepCap(
+            scanOneKeyword(ctx, state.session!, device, profileId, keyword, proxy, onProgress),
+            `keyword scan "${keyword}" (${pname})`
+          );
           if (res.captcha) {
             // markSolverFailed already called in scanOneKeyword
             hotProfiles.add(profileId);
@@ -1097,7 +1136,7 @@ async function runDeviceScan(
               profileOpenController.abort(new Error("profile open timeout"));
             }, 90_000);
             try {
-              ok = await openNext(state, profileOpenController.signal);
+              ok = await withScanStepCap(openNext(state, profileOpenController.signal), "profile open");
             } catch (err) {
               logger.warn({ device, worker: w, profileId: state.profileId, err: String(err) }, "openNext failed or aborted");
               ok = false;
@@ -1124,7 +1163,10 @@ async function runDeviceScan(
           for (let ipTry = 1; ipTry <= keywordIpRetries && !keywordDone; ipTry++) {
             try {
               const proxy = state.profileId ? pool.proxies.get(state.profileId) : undefined;
-              const res = await scanOneKeyword(ctx, state.session!, device, state.profileId!, keyword, proxy, onProgress);
+              const res = await withScanStepCap(
+                scanOneKeyword(ctx, state.session!, device, state.profileId!, keyword, proxy, onProgress),
+                `keyword scan "${keyword}" (worker ${w})`
+              );
               state.queriesOnProfile++;
 
               if (res.captcha) {
@@ -1135,7 +1177,7 @@ async function runDeviceScan(
                   "hard-block — retrying keyword on another IP"
                 );
                 sharedQueue.unshift(keyword);
-                const ok = await openNext(state, signal);
+                const ok = await withScanStepCap(openNext(state, signal), "profile reopen").catch(() => false);
                 if (!ok) {
                   await closeState(state);
                   return;
@@ -1214,7 +1256,7 @@ async function runDeviceScan(
                       if (state.profileId) hotProfiles.add(state.profileId);
                       state.queriesOnProfile = queriesPerProfile;
                       sharedQueue.unshift(keyword);
-                      const ok = await openNext(state, signal);
+                      const ok = await withScanStepCap(openNext(state, signal), "profile reopen").catch(() => false);
                       if (!ok) {
                         await closeState(state);
                         return;
@@ -1230,7 +1272,7 @@ async function runDeviceScan(
               if (state.profileId) hotProfiles.add(state.profileId);
               state.queriesOnProfile = queriesPerProfile;
               sharedQueue.unshift(keyword);
-              const ok = await openNext(state, signal);
+              const ok = await withScanStepCap(openNext(state, signal), "profile reopen").catch(() => false);
               if (!ok) {
                 await closeState(state);
                 return;
