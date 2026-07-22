@@ -17,3 +17,8 @@ node_modules/
 .DS_Store
 Thumbs.db
 *.log
+
+# Agent/tooling artifacts (Claude Code, skill dirs)
+.claude/
+.agents/
+skills-lock.json
