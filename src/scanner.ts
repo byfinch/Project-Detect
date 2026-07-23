@@ -857,17 +857,26 @@ async function runDeviceScan(
   const queriesPerProfile = Math.max(1, config.scan.queriesPerProfile ?? 1);
 
   /**
-   * Safe / only-profiles mode: EVERY profile in the pool runs ALL keywords.
+   * Safe / only-profiles mode. Full-variant scans (45 keywords × 5 profiles)
+   * took 2.5h+ per device — far past the 2h cadence. Now keywords are SHARDED
+   * across pool profiles (each keyword once per scan) whenever the list is
+   * longer than the pool: same coverage, ~5x faster, profiles freed for clicks.
+   * Short lists keep the old all-keywords-per-profile behavior.
    * Captcha on one profile stops that profile only — never reassigns keyword to burn another clean IP.
    */
   if (ctx.onlyProfileNames || ctx.protectPool) {
-    logger.info(
-      { device, profiles: pool.ids.length, keywords: keywords.length },
-      "protected pool mode: each profile runs full keyword list"
-    );
     const totalProfiles = pool.ids.length;
+    const sharded = keywords.length > totalProfiles;
+    logger.info(
+      { device, profiles: totalProfiles, keywords: keywords.length, sharded },
+      sharded
+        ? "protected pool mode: keywords sharded across profiles"
+        : "protected pool mode: each profile runs full keyword list"
+    );
     for (let pi = 0; pi < pool.ids.length; pi++) {
       const profileId = pool.ids[pi]!;
+      const profileKeywords = sharded ? keywords.filter((_, ki) => ki % totalProfiles === pi) : keywords;
+      if (profileKeywords.length === 0) continue;
       if (hotProfiles.has(profileId)) continue;
       const pnameHint = pool.nameById.get(profileId) || profileId;
       const remainingAfter = totalProfiles - pi - 1;
@@ -910,7 +919,7 @@ async function runDeviceScan(
       }
       const pname = pool.nameById.get(profileId) || profileId;
       const persona = personaFor(pname);
-      logger.info({ device, profile: pname, persona: persona.label, keywords: keywords.length }, "protected profile scan start");
+      logger.info({ device, profile: pname, persona: persona.label, keywords: profileKeywords.length }, "protected profile scan start");
       onProgress?.({
         type: "scan-progress",
         device,
@@ -924,17 +933,19 @@ async function runDeviceScan(
 
       // Desktop: Safe–Keyword–Safe–Keyword…
       // openNext already did first live trend (Safe). Between brands: another live trend (not fixed soft words).
+      // Cadence: with sharded variant lists, per-keyword trends dominated scan time
+      // (~25s × 45) — now every 3rd keyword, the session is already warm.
       // Mobile: brands back-to-back (single-pass brand only).
-      for (let ki = 0; ki < keywords.length; ki++) {
+      for (let ki = 0; ki < profileKeywords.length; ki++) {
         if (swarmTarget) {
           logger.info({ device, profile: pname, keyword: swarmTarget.keyword, domain: swarmTarget.ad.displayDomain }, "swarm: target locked, stopping scan worker");
           await closeState(state);
           return;
         }
-        const keyword = keywords[ki]!;
+        const keyword = profileKeywords[ki]!;
         const proxy = pool.proxies.get(profileId);
 
-        if (device === "desktop" && ki > 0) {
+        if (device === "desktop" && ki > 0 && ki % 3 === 0) {
           onProgress?.({
             type: "scan-progress",
             device,
