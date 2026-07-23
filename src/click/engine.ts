@@ -978,6 +978,7 @@ export async function runClickEngine(
     store,
     fixedTotalJobs,
     sharedStats,
+    onProgress, // harvest clicks bypass executeJob and emit directly through ctx
   };
 
 

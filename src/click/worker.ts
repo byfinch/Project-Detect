@@ -24,6 +24,8 @@ export interface WorkerContext {
   outputDir: string;
   profileMeta: Map<string, ProfileSummary>;
   store: ClickStore;
+  /** Optional panel event sink — harvest clicks use it (they bypass executeJob). */
+  onProgress?: (event: Record<string, unknown>) => void;
   /**
    * Locked at run start (plan size). Never changes when retries requeue —
    * panel total must stay stable.
@@ -694,6 +696,22 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
         const r = await clickAndReportAd(extra, extraJob);
         ctx.store.insertClick(ctx.runId, { job: extraJob, status: r.status, evidence: r.evidence, error: r.error, capturedAt: new Date().toISOString(), report: r.reportResult });
         if (r.status === "success") anySuccess = true;
+        // Harvest clicks bypass executeJob — emit their own panel event or the
+        // terminal never shows them (report stays visible only in Raporlama).
+        ctx.onProgress?.({
+          type: "click-done",
+          jobId: extraJob.id,
+          runId: ctx.runId,
+          domain: extra.displayDomain,
+          device: job.device,
+          profileId: job.profileId,
+          status: r.status,
+          reportStatus: r.reportResult?.status ?? null,
+          reportMessage: r.reportResult?.message ?? null,
+          stayMs: r.evidence?.stayMs ?? 0,
+          harvest: true,
+          message: `hasat tık ${r.status} · rapor ${r.reportResult?.status ?? "-"} · ${extra.displayDomain} · ${job.device}`,
+        });
       }
       status = anySuccess ? "success" : "skipped";
       error = anySuccess ? null : "target not found; harvest failed";
