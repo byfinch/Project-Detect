@@ -356,7 +356,7 @@ async function stopFocus() {
   const btn = document.getElementById("btn-stop-focus");
   if (btn) {
     btn.disabled = true;
-    btn.innerHTML = `<span class="btn-icon">…</span> Durduruluyor`;
+    btn.innerHTML = `Durduruluyor`;
   }
   try {
     await API.post("/api/campaign/stop", {});
