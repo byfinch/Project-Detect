@@ -1068,7 +1068,7 @@ export function createWebServer(port: number): void {
           email,
           googleNotifId: notifId,
           googleOutcome: google?.outcomeSubject ?? null,
-          evidenceUrl: `/api/reports/evidence-img?run=${Number(r.run_id)}&job=${encodeURIComponent(String(r.job_id ?? ""))}&name=04-report-submitted.png`,
+          evidenceUrl: `/api/reports/evidence-img?run=${Number(r.run_id)}&job=${encodeURIComponent(String(r.job_id ?? ""))}&name=04-report-submitted.jpg`,
         });
       }
       res.json({ total: Number(countRow.c) || 0, page, limit, results });
@@ -1235,7 +1235,8 @@ export function createWebServer(port: number): void {
       const run = String(req.query.run || "").replace(/[^0-9]/g, "");
       const job = String(req.query.job || "").replace(/[^a-zA-Z0-9._-]/g, "");
       const name = String(req.query.name || "").replace(/[^a-zA-Z0-9.-]/g, "");
-      if (!run || !job || !name.endsWith(".png")) {
+      // Accept .jpg (new) and .png (legacy files from before the format switch).
+      if (!run || !job || !/\.(jpe?g|png)$/.test(name)) {
         res.status(404).end();
         return;
       }
@@ -1245,6 +1246,8 @@ export function createWebServer(port: number): void {
         res.status(404).end();
         return;
       }
+      // Evidence files are immutable once written — cache hard in the browser.
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
       res.sendFile(file);
     } catch {
       res.status(404).end();

@@ -481,8 +481,10 @@ export async function fillReportForm(
     if (!evidenceDir) return;
     try {
       mkdirSync(evidenceDir, { recursive: true });
-      const p = resolve(evidenceDir, `${name}.png`);
-      await page.screenshot({ path: p, fullPage: false, timeout: 10000 });
+      // JPEG over PNG: ~5-10x smaller, much faster to load in the panel.
+      // Quality 80 keeps form text readable for customer-facing evidence.
+      const p = resolve(evidenceDir, `${name}.jpg`);
+      await page.screenshot({ path: p, fullPage: false, timeout: 10000, type: "jpeg", quality: 80 });
       shots.push(p);
     } catch (err) {
       logger.debug({ err: String(err) }, "report screenshot failed");
