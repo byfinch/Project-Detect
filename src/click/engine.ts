@@ -16,6 +16,7 @@ import { deviceOfProfile, selectPools } from "./pool.js";
 import { runClickJob, type WorkerContext } from "./worker.js";
 import { releaseProfile } from "../browser/profileRegistry.js";
 import { ClickStore } from "./store.js";
+import { governedConcurrency } from "../util/resources.js";
 
 function randomBetween(min: number, max: number): number {
   return Math.random() * (max - min) + min;
@@ -341,6 +342,25 @@ async function runDeviceClickEngine(
   let skipped = 0;
   let lastHeartbeat = 0;
   let lastHeartbeatKey = "";
+
+  /**
+   * RAM governor: effective parallelism follows MemAvailable instead of a
+   * hard-coded cap. Both device legs read the SAME host RAM, so as one leg
+   * spawns browsers the other's governor sheds automatically — no global
+   * coordinator needed. Bigger VPS → same code runs wider.
+   */
+  let lastGovConc = concurrency;
+  function effectiveConcurrency(): number {
+    const d = governedConcurrency({ base: concurrency, floor: 4, ceiling: 16 });
+    if (d.concurrency !== lastGovConc) {
+      logger.info(
+        { device, from: lastGovConc, to: d.concurrency, availMb: d.availMb, reason: d.reason },
+        "click governor: concurrency adjusted"
+      );
+      lastGovConc = d.concurrency;
+    }
+    return d.concurrency;
+  }
 
   /**
    * Device circuit breaker: probe runs showed Google often serves ZERO ads to
@@ -739,7 +759,7 @@ async function runDeviceClickEngine(
       await sleep(500);
       continue;
     }
-    while (runningProfiles.size < concurrency) {
+    while (runningProfiles.size < effectiveConcurrency()) {
       const job = pickNextJob();
       if (!job) break;
       // No blind fast-skip: every job runs for real — the SERP may carry
