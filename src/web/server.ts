@@ -955,23 +955,40 @@ export function createWebServer(port: number): void {
     try {
       const rows = store.db
         .prepare(
-          `SELECT profile_id, name, device, status, consecutive_fails, total_solves, next_retry_at, last_clean_at, last_error
+          `SELECT profile_id, name, device, status, consecutive_fails, total_solves, next_retry_at, last_clean_at, last_error, updated_at
            FROM ip_trust ORDER BY status, device, profile_id`
         )
         .all() as Array<Record<string, unknown>>;
-      const nowIso = new Date().toISOString();
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      // A one-off failure from days ago is NOT a health problem — profiles
+      // recover (Google forgives, trend warm-ups succeed). "captcha" only
+      // counts CURRENT issues: in cooldown or failed within the last 48h.
+      const RECENT_FAIL_MS = 48 * 60 * 60 * 1000;
       res.json({
-        profiles: rows.map((r) => ({
-          id: String(r.profile_id),
-          name: String(r.name || r.profile_id),
-          device: String(r.device ?? ""),
-          status: String(r.status ?? ""),
-          consecutiveFails: Number(r.consecutive_fails ?? 0),
-          totalSolves: Number(r.total_solves ?? 0),
-          cooling: !!(r.next_retry_at && String(r.next_retry_at) > nowIso),
-          nextRetryAt: r.next_retry_at ? String(r.next_retry_at) : null,
-          lastError: r.last_error ? String(r.last_error).slice(0, 120) : null,
-        })),
+        profiles: rows.map((r) => {
+          const rawStatus = String(r.status ?? "usable");
+          const cooling = !!(r.next_retry_at && String(r.next_retry_at) > nowIso);
+          const lastChangeMs = r.updated_at ? Date.parse(String(r.updated_at)) : 0;
+          const recentFail = lastChangeMs > 0 && nowMs - lastChangeMs < RECENT_FAIL_MS;
+          const displayStatus =
+            rawStatus === "captcha" || rawStatus === "quarantined"
+              ? cooling || recentFail
+                ? rawStatus
+                : "usable";
+              : rawStatus;
+          return {
+            id: String(r.profile_id),
+            name: String(r.name || r.profile_id),
+            device: String(r.device ?? ""),
+            status: displayStatus,
+            consecutiveFails: Number(r.consecutive_fails ?? 0),
+            totalSolves: Number(r.total_solves ?? 0),
+            cooling,
+            nextRetryAt: r.next_retry_at ? String(r.next_retry_at) : null,
+            lastError: r.last_error ? String(r.last_error).slice(0, 120) : null,
+          };
+        }),
       });
     } finally {
       store.close();

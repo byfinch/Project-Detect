@@ -189,8 +189,11 @@ async function openProfile(ctx: WorkerContext, profileId: string, device: Device
     return session;
   } catch (err) {
     logger.warn({ profileId, err: String(err) }, "click worker failed to open profile");
-    // Never leave an orphaned AdsPower browser behind on open failure.
+    // Never leave an orphaned AdsPower browser behind on open failure — and
+    // kill the zombie NOW (CDP attach refused = crashed/zombie browser), don't
+    // wait for the reaper's next tick.
     try {
+      await ctx.adsClient.stopBrowser(profileId).catch(() => {});
       const { gracefulProfileShutdown } = await import("../browser/shutdown.js");
       await gracefulProfileShutdown(ctx.adsClient, session, profileId);
     } catch {
