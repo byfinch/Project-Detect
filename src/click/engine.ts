@@ -331,15 +331,15 @@ async function runDeviceClickEngine(
    * are fast-skipped without opening a browser. Fresh per run; the campaign's
    * next presence scan re-evaluates anyway.
    */
-  let consecutiveNotFoundSkips = 0;
-  let deviceBlind = false;
   /**
-   * Blind-mode probing: instead of writing the device off for the whole wave,
-   * every 5th job still runs for real (open + warm-up + SERP check). Ad serving
-   * rotates — 2 empty results prove nothing — so probes let a recovering device
-   * re-enter without burning more than ~20% of the queue on empty checks.
+   * Ad-free tracking is INFORMATIONAL only: every job runs for real
+   * (open + warm-up + SERP check), because even when the target ad is
+   * missing, other ads on the SERP are harvest targets — only a real check
+   * can tell. After 3 consecutive "not found" results we log a warning
+   * once, but never skip jobs blindly.
    */
-  let blindSkips = 0;
+  let consecutiveNotFoundSkips = 0;
+  let adFreeWarned = false;
 
   /**
    * Tail watchdog: when the queue is drained and only stragglers remain, the
@@ -493,36 +493,22 @@ async function runDeviceClickEngine(
         bumpShared("failed");
       }
 
-      // Circuit breaker tally (see declaration above).
+      // Ad-free tracking (informational only — see declaration above).
       if (result.status === "skipped" && /not found|no href/i.test(result.error || "")) {
         consecutiveNotFoundSkips++;
-        if (!deviceBlind && consecutiveNotFoundSkips >= 2) {
-          deviceBlind = true;
-          logger.warn({ device, pending: pending.length }, "device blind: SERP ad-free — probing every 5th job");
+        if (!adFreeWarned && consecutiveNotFoundSkips >= 3) {
+          adFreeWarned = true;
+          logger.warn({ device, pending: pending.length }, "device looks ad-free — jobs continue with real checks");
           onProgress?.({
             type: "click-progress",
             runId: ctx.runId,
             device,
-            phase: "device-blind",
-            message: `${device} · SERP reklamsız görünüyor · her 5. iş gerçek kontrol, kalanı hızlı geçiliyor`,
+            phase: "device-adfree-hint",
+            message: `${device} · SERP üst üste reklamsız · işler gerçek kontrolle devam ediyor`,
           });
         }
       } else {
         consecutiveNotFoundSkips = 0;
-        // Any non-"not found" outcome from a blind-mode probe means ads are
-        // being served again (success, or ads present but harvest failed) —
-        // leave blind mode and resume normal processing.
-        if (deviceBlind) {
-          deviceBlind = false;
-          logger.info({ device, status: result.status }, "device recovered — leaving blind mode");
-          onProgress?.({
-            type: "click-progress",
-            runId: ctx.runId,
-            device,
-            phase: "device-recovered",
-            message: `${device} · reklam tekrar görünüyor · normal moda dönüldü`,
-          });
-        }
       }
 
       // Retry on OTHER profile only — does NOT increase locked total (swap remaining work).
@@ -737,59 +723,8 @@ async function runDeviceClickEngine(
     while (runningProfiles.size < concurrency) {
       const job = pickNextJob();
       if (!job) break;
-      if (deviceBlind) {
-        blindSkips++;
-        // Every 5th job runs for real as a probe (open + warm-up + SERP check).
-        // The rest fast-skip. Probes are how a recovering device re-enters.
-        if (blindSkips % 5 !== 0) {
-        // Fast-skip: Google isn't serving ads to this device right now —
-        // record the skip without burning a profile open+warm-up cycle.
-        skipped++;
-        bumpShared("skipped");
-        const blindResult: ClickResult = {
-          job,
-          status: "skipped",
-          error: "device blind — SERP reklamsız (hızlı geçiş)",
-          capturedAt: new Date().toISOString(),
-          evidence: {
-            serpUrl: null, adTitle: null, adDescription: null, displayUrl: null,
-            clickUrl: null, landingUrl: null, finalUrl: null, finalDomain: null,
-            redirectHops: [], screenshotSerp: null, screenshotLanding: null,
-            screenshotFinal: null, preClickMs: 0, stayMs: 0, internalClicks: 0,
-          },
-          report: { status: "skipped", message: "device blind" },
-        };
-        results.push(blindResult);
-        try {
-          ctx.store.insertClick(ctx.runId, blindResult);
-        } catch {
-          /* store hiccup must not take down the whole device leg */
-        }
-        const g = globalDone();
-        onProgress?.({
-          type: "click-done",
-          jobId: job.id,
-          runId: ctx.runId,
-          domain: job.targetDomain,
-          device: job.device,
-          profileId: job.profileId,
-          status: "skipped",
-          reportStatus: "skipped",
-          reportMessage: "device blind",
-          stayMs: 0,
-          completed: g.completed,
-          failed: g.failed,
-          captcha: g.captcha,
-          skipped: g.skipped,
-          total: lockedTotal,
-          remaining: Math.max(0, lockedTotal - g.done),
-          message: `tık skipped · reklamsız cihaz (hızlı) · ${job.targetDomain} · ${job.device} (${Math.min(g.done, lockedTotal)}/${lockedTotal})`,
-        });
-        continue;
-        }
-        // probe job: fall through to executeJob below
-        logger.info({ device, jobId: job.id, blindSkips }, "blind-mode probe — real SERP check");
-      }
+      // No blind fast-skip: every job runs for real — the SERP may carry
+      // other harvestable ads even when the target is missing.
       void executeJob(job);
     }
     // Tail watchdog: queue drained, only stragglers left — healthy jobs run
