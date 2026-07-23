@@ -202,7 +202,13 @@ export class AdsPowerClient {
       }
       if (json.code === 0) return json.data;
       lastMsg = json.msg;
-      if (/too many request/i.test(json.msg ?? "")) continue;
+      if (/too many request/i.test(json.msg ?? "")) {
+        // The Local API's per-second budget may be drained by something outside
+        // this client (desktop app sync, another component's limiter). Limiter
+        // spacing alone (~1s) is not enough to recover — back off harder.
+        await new Promise((r) => setTimeout(r, 2500 * attempt));
+        continue;
+      }
       throw new AdsPowerError(json.msg, json.code, path);
     }
     throw new AdsPowerError(`retries exhausted: ${lastMsg}`, -1, path);
