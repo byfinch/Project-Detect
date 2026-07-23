@@ -244,9 +244,25 @@ export async function parseAds(page: Page, labelTokens: string[] = AD_LABEL_TOKE
           break;
         }
       }
+      // App-store ads (Play Store / App Store): the advertised entity is the
+      // app — the store page is the meaningful domain, not google.com.
+      if (!displayDomain) {
+        const storeA = c.querySelector('a[href*="play.google.com/store"], a[href*="apps.apple.com"]');
+        const storeHref = storeA ? storeA.getAttribute("href") || "" : "";
+        const sm = storeHref.match(/https?:\/\/(play\.google\.com|apps\.apple\.com)\/[^\s&"']*/);
+        if (sm) {
+          displayUrl = sm[0];
+          displayDomain = sm[1];
+        }
+      }
       if (!displayDomain && adHref) {
         try {
-          displayDomain = new URL(adHref, location.href).hostname.replace(/^www\./, "");
+          const host = new URL(adHref, location.href).hostname.replace(/^www\./, "");
+          // Google-owned redirect hosts (aclk etc.) are not the advertiser —
+          // leave the domain empty instead of recording a bogus "google.com".
+          if (!/(^|\.)google\.[a-z.]+$|googleadservices\.com$|doubleclick\.net$/i.test(host)) {
+            displayDomain = host;
+          }
         } catch {
           /* ignore */
         }

@@ -1599,7 +1599,14 @@ export function createWebServer(port: number): void {
             }
           } catch (err) {
             logger.warn({ err: String(err) }, "auto focus campaign start failed");
-            emitEvent({ type: "click-failed", error: String(err), auto: true });
+            // Must carry a message — otherwise the terminal shows the scan
+            // stuck at "plan hazırlanıyor" with no explanation (seen live).
+            emitEvent({
+              type: "click-failed",
+              error: String(err),
+              auto: true,
+              message: `Kampanya başlatılamadı: ${String(err).slice(0, 120)}`,
+            });
           }
         }
       } catch (err) {

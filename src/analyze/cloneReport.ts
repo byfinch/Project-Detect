@@ -150,6 +150,9 @@ export function analyzeScanClones(
     }
     const key = normDomain(row.display_domain || row.final_domain || "");
     if (!key || key === "unknown") continue;
+    // Google-owned shells (Play Store redirect etc.) are never a click target —
+    // keep them out of clone counting so a google-only scan plans nothing.
+    if (/(^|\.)google\.[a-z.]+$/i.test(key)) continue;
 
     const list = byDomain.get(key) ?? [];
     list.push(row);
