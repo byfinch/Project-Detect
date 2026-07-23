@@ -659,6 +659,39 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
         await sleep(1500);
       }
 
+      // 1:1 guarantee — the report failed on this impression (no-form /
+      // submit-failed / wedged opener) but the click landed. ONE bounded
+      // retry on a FRESH impression: re-search the keyword, re-locate the ad,
+      // report only. Google rotates cards, so the fresh card usually has the
+      // menu again. Naturalness preserved: single retry, same profile, new SERP.
+      if (
+        st === "success" &&
+        ctx.config.report.autoSerpSubmit &&
+        (rep.status === "no-form" || rep.status === "submit-failed" || rep.status === "error" || rep.status === "skipped")
+      ) {
+        try {
+          logger.info({ jobId: jobForRecord.id, domain: currentAd.displayDomain, prev: rep.status }, "report retry on fresh impression");
+          await page.goto(serpUrl, { waitUntil: "domcontentloaded", timeout: 25000 }).catch(() => {});
+          await sleep(1200);
+          const retryAds = await parseAds(page);
+          const retryAd = matchAd(retryAds, currentAd.displayDomain, currentAd.title, false);
+          if (retryAd?.adHref) {
+            const retryTarget = toClickable(retryAd);
+            const retryRep = await maybeReportAdBeforeClick(ctx, page, jobForRecord, retryTarget, {
+              finalUrl: ev.finalUrl,
+              finalDomain: ev.finalDomain,
+            });
+            if (retryRep.status === "submitted" || retryRep.status === "filled" || rep.status === "skipped") {
+              rep = retryRep;
+            }
+          } else {
+            logger.info({ jobId: jobForRecord.id, domain: currentAd.displayDomain }, "report retry: ad not on fresh SERP (rotated)");
+          }
+        } catch (retryErr) {
+          logger.warn({ jobId: jobForRecord.id, err: String(retryErr) }, "report retry failed (keeping original result)");
+        }
+      }
+
       return { status: st, error: err, evidence: ev, reportResult: rep };
     }
 
