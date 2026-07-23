@@ -252,7 +252,7 @@ export async function parseAds(page: Page, labelTokens: string[] = AD_LABEL_TOKE
         const sm = storeHref.match(/https?:\/\/(play\.google\.com|apps\.apple\.com)\/[^\s&"']*/);
         if (sm) {
           displayUrl = sm[0];
-          displayDomain = sm[1];
+          displayDomain = sm[1]!;
         }
       }
       if (!displayDomain && adHref) {
