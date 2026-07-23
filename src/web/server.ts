@@ -140,18 +140,14 @@ function getNextScheduledSlot(from = new Date()): Date {
   const tr = trDateParts(from);
   const dayStart = trDateFromParts({ year: tr.year, month: tr.month, day: tr.day, hour: 0, minute: 0 });
   // Slots every 2h anchored at 06:00 TR → covers overnight too: 06,08,...,22,00,02,04.
-  const slotHours: number[] = [];
-  for (let h = SCHEDULED_FIRST_HOUR; h < SCHEDULED_FIRST_HOUR + 24; h += SCHEDULED_INTERVAL_HOURS) {
-    slotHours.push(h % 24);
-  }
-  const candidates = slotHours
-    .map((h) => new Date(dayStart.getTime() + h * 60 * 60 * 1000))
-    .sort((a, b) => a.getTime() - b.getTime());
-  for (const c of candidates) {
-    if (c > from) return c;
-  }
-  // All today's slots passed → first slot tomorrow (06:00 TR).
-  return new Date(dayStart.getTime() + 24 * 60 * 60 * 1000 + SCHEDULED_FIRST_HOUR * 60 * 60 * 1000);
+  // Walk the CONTINUOUS grid (dayStart + n·2h) instead of today's wall-clock
+  // hours — the old code compared only today's slots, so after 22:xx TR the
+  // 00/02/04 next-day slots were skipped straight to 06:00 next day.
+  const gridStep = SCHEDULED_INTERVAL_HOURS * 60 * 60 * 1000;
+  const firstSlot = dayStart.getTime() + SCHEDULED_FIRST_HOUR * 60 * 60 * 1000;
+  const elapsed = from.getTime() - firstSlot;
+  const stepsAhead = Math.max(1, Math.ceil(elapsed / gridStep));
+  return new Date(firstSlot + stepsAhead * gridStep);
 }
 
 function jobsStatePath(outputDir: string): string {
