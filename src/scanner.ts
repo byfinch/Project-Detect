@@ -693,18 +693,21 @@ async function runDeviceScan(
     }
   };
 
-  const openNext = async (state: WorkerState, localSignal?: AbortSignal): Promise<boolean> => {
+  const openNext = async (state: WorkerState, localSignal?: AbortSignal, forceId?: string): Promise<boolean> => {
     throwIfAborted("openNext");
     // closeState carries the 60s hard cap + AdsPower API kill for wedged renderers.
     await closeState(state);
 
-    for (let tried = 0; tried < pool.ids.length; tried++) {
+    // Protect-pool parallel mode pins one profile per worker: try ONLY the
+    // forced id (never burn a different clean profile as a substitute).
+    const maxTries = forceId ? 1 : pool.ids.length;
+    for (let tried = 0; tried < maxTries; tried++) {
       throwIfAborted("openNext");
       if (localSignal?.aborted) {
         logger.warn({ device }, "openNext local abort");
         return false;
       }
-      const candidate = pickCandidate();
+      const candidate = forceId ?? pickCandidate();
       if (!candidate) return false;
       let session: BrowserSession | null = null;
       try {
@@ -873,13 +876,13 @@ async function runDeviceScan(
         ? "protected pool mode: keywords sharded across profiles"
         : "protected pool mode: each profile runs full keyword list"
     );
-    for (let pi = 0; pi < pool.ids.length; pi++) {
+    let profilesDone = 0;
+    const runProtectedProfile = async (pi: number): Promise<void> => {
       const profileId = pool.ids[pi]!;
       const profileKeywords = sharded ? keywords.filter((_, ki) => ki % totalProfiles === pi) : keywords;
-      if (profileKeywords.length === 0) continue;
-      if (hotProfiles.has(profileId)) continue;
+      if (profileKeywords.length === 0) return;
+      if (hotProfiles.has(profileId)) return;
       const pnameHint = pool.nameById.get(profileId) || profileId;
-      const remainingAfter = totalProfiles - pi - 1;
       onProgress?.({
         type: "scan-progress",
         device,
@@ -890,9 +893,8 @@ async function runDeviceScan(
         phase: "profile-open",
       });
       const state: WorkerState = { session: null, profileId: null, queriesOnProfile: 0 };
-      // Force this profile next (pickCandidate respects hot set).
-      poolIdx = pool.ids.indexOf(profileId);
-      const ok = await withScanStepCap(openNext(state, signal), `profile open (${pnameHint})`, () => {
+      // Parallel protect mode pins this exact profile (never a substitute IP).
+      const ok = await withScanStepCap(openNext(state, signal, profileId), `profile open (${pnameHint})`, () => {
         state.timedOut = true;
       }).catch(async (err) => {
         // Scan-level abort must propagate — swallowing it traps the scan here.
@@ -902,7 +904,6 @@ async function runDeviceScan(
         return false;
       });
       if (!ok || state.profileId !== profileId) {
-        // openNext may pick another if open failed — if wrong profile, close and skip.
         if (state.profileId && state.profileId !== profileId) {
           hotProfiles.add(profileId);
           await closeState(state);
@@ -912,10 +913,10 @@ async function runDeviceScan(
           type: "scan-progress",
           device,
           profileId,
-          message: `Profil atlandı (${device}): ${pnameHint} · kalan ~${remainingAfter}`,
+          message: `Profil atlandı (${device}): ${pnameHint}`,
           phase: "profile-skip",
         });
-        continue;
+        return;
       }
       const pname = pool.nameById.get(profileId) || profileId;
       const persona = personaFor(pname);
@@ -1132,6 +1133,7 @@ async function runDeviceScan(
       }
       // Close only after all keywords (+ inline clicks) on this profile
       await closeState(state);
+      profilesDone++;
       onProgress?.({
         type: "scan-progress",
         device,
@@ -1139,18 +1141,21 @@ async function runDeviceScan(
         profileIndex: pi + 1,
         profileTotal: totalProfiles,
         message:
-          remainingAfter > 0
-            ? `Profil kapandı: ${pname} (${device}) · sırada ~${remainingAfter} profil daha`
+          profilesDone < totalProfiles
+            ? `Profil kapandı: ${pname} (${device}) · biten ${profilesDone}/${totalProfiles}`
             : `Son profil kapandı: ${pname} (${device}) · cihaz havuzu bitti`,
         phase: "profile-closed",
       });
-      // Cool-down between profiles in the safe pool.
-      await jitterDelay(config.scan.minDelayMs, config.scan.maxDelayMs);
-    }
+    };
+    // All pool profiles in parallel (light stagger avoids an AdsPower API burst).
+    // 5+5 across devices matches the click engine's proven load.
+    await Promise.all(
+      pool.ids.map((_, pi) => sleep(pi * 1500 + Math.floor(Math.random() * 700)).then(() => runProtectedProfile(pi)))
+    );
     onProgress?.({
       type: "scan-progress",
       device,
-      message: `${device} cihaz taraması tamamlandı (${totalProfiles} profil denendi) — diğer cihazlar sürebilir`,
+      message: `${device} cihaz taraması tamamlandı (${totalProfiles} profil paralel tarandı) — diğer cihazlar sürebilir`,
       phase: "device-done",
     });
     return;
