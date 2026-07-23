@@ -21,6 +21,24 @@ import type { Device } from "./types.js";
 import type { ClickMode, ClickTarget, TargetDevice } from "./click/types.js";
 import { logger } from "./logger.js";
 
+// Fatal fingerprints: the service died once with exit 1 and ZERO output —
+// unlogged unhandled rejections are invisible in the journal. Log first,
+// then exit so systemd restarts us with evidence preserved.
+process.on("unhandledRejection", (reason) => {
+  try {
+    logger.fatal({ err: String(reason), stack: reason instanceof Error ? reason.stack : undefined }, "FATAL: unhandledRejection — process exiting");
+  } finally {
+    process.exit(1);
+  }
+});
+process.on("uncaughtException", (err) => {
+  try {
+    logger.fatal({ err: String(err), stack: err.stack }, "FATAL: uncaughtException — process exiting");
+  } finally {
+    process.exit(1);
+  }
+});
+
 const program = new Command();
 program.name("detect").description("Google SERP paid-ad scanner (Turkey, desktop + mobile) via AdsPower").version("0.1.0");
 
