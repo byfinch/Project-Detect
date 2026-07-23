@@ -157,4 +157,6 @@ export interface ClickRunOptions {
   baseTime?: number;
   fallbackFirstAd?: boolean;
   clickFirstResult?: boolean;
+  /** Profiles that saw this domain in the last ~48h (from results), per device. */
+  affinitySeers?: Map<Device, string[]>;
 }

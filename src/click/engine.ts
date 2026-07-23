@@ -80,6 +80,16 @@ export function buildJobs(opts: ClickRunOptions): ClickJob[] {
     if (!list.includes(imp.profileId)) list.push(imp.profileId);
     seersByDevice.set(imp.device, list);
   }
+  // Affinity shortlist (last ~48h sightings) — appended after this scan's
+  // impressions so recent seers also jump the queue. Pool filter applies.
+  for (const [dev, ids] of opts.affinitySeers ?? []) {
+    if (!profileIds.length) continue;
+    const list = seersByDevice.get(dev) ?? [];
+    for (const id of ids) {
+      if (profileIds.includes(id) && !list.includes(id)) list.push(id);
+    }
+    seersByDevice.set(dev, list);
+  }
 
   // Prefer keyword that profile actually saw when available.
   const keywordFor = (profileId: string, device: Device, fallbackIndex: number): string => {
@@ -151,6 +161,7 @@ export function buildJobs(opts: ClickRunOptions): ClickJob[] {
         device,
         totalClicks,
         seers: seers.length,
+        affinitySeers: (opts.affinitySeers?.get(device) ?? []).length,
         others: others.length,
         jobs: made,
       },
@@ -266,8 +277,14 @@ async function runDeviceClickEngine(
 
   // Build jobs for each target, then interleave them round-robin.
   const perTargetJobs: ClickJob[][] = [];
+  const affinitySince = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
   for (const target of targets) {
     const deviceMap = new Map(profileIds.map((id) => [id, device]));
+    // Affinity shortlist from recent sightings (results table) — recent seers
+    // of this domain jump the queue; cooldown filtering happens upstream.
+    const affinitySeers = new Map<Device, string[]>([
+      [device, ctx.store.recentSeers(target.domain, device, affinitySince)],
+    ]);
     const jobs = buildJobs({
       target: { ...target, targetDevice: device },
       profileIds,
@@ -275,6 +292,7 @@ async function runDeviceClickEngine(
       engineConfig,
       fallbackFirstAd: fallbackFirstAd ?? false,
       clickFirstResult: target.clickFirstResult ?? false,
+      affinitySeers,
     });
     perTargetJobs.push(jobs);
   }

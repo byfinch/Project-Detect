@@ -326,6 +326,26 @@ export class ClickStore {
   }
 
   /**
+   * Affinity shortlist: profiles that SAW this domain in scans recently
+   * (default ~48h), most recent first. Seeing is free signal — Google's ad
+   * serving is per-user, so recent seers are the most likely to be served
+   * again. Cooldown filtering stays with the caller/pool selection.
+   */
+  recentSeers(domain: string, device: string, sinceIso: string): string[] {
+    const d = domain.toLowerCase().replace(/^www\./, "");
+    const rows = this.db
+      .prepare(
+        `SELECT profile_id, MAX(captured_at) AS last_seen
+         FROM results
+         WHERE LOWER(display_domain) IN (?, ?) AND device = ? AND captured_at > ?
+         GROUP BY profile_id
+         ORDER BY last_seen DESC`
+      )
+      .all(d, `www.${d}`, device, sinceIso) as Array<{ profile_id: string }>;
+    return rows.map((r) => r.profile_id);
+  }
+
+  /**
    * Operation results grouped PER OPERATION (campaign/job) × domain.
    * Waves/queues inside one operation accumulate into a single row — queue
    * boundaries don't split anything. A NEW operation on the same ad starts
