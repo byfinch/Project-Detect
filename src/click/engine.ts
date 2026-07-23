@@ -192,8 +192,9 @@ export function buildEngineConfig(
       sameAdCooldownMinutes: Math.max(30, base.sameAdCooldownMinutes),
     },
     adaptive: {
-      // Magnetar-class VPS (8C/12GB): default concurrency 10 is the sweet spot for desktop click fleets.
-      concurrency: Math.min(10, Math.max(1, base.concurrency)),
+      // Magnetar-class VPS (8C/12GB + swap): 12 parallel browsers is the measured
+      // ceiling before RAM pressure starts to bite; swap absorbs the peaks.
+      concurrency: Math.min(12, Math.max(1, base.concurrency)),
       clicksPerProfile: base.clicksPerProfile,
       durationMinutes: base.durationMinutes,
       staggerWindowSeconds: base.staggerWindowSeconds,

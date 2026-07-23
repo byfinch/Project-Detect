@@ -67,6 +67,13 @@ function createJobId(type: string): string {
 const SCHEDULED_BRANDS = ["herabet", "rovbet", "napolibet", "primebahis", "vegasslot"];
 /** Slim variant set for scheduled scans: base + 3 suffixes = 4 keywords/brand. */
 const SCHEDULED_SLIM_SUFFIXES = ["giriş", "güncel adres", "bonus"];
+/**
+ * High-volume generic betting auctions appended to every scheduled scan
+ * (unexpanded). Measured supply was concentrated on 2 client brands only;
+ * generic auctions carry many more live advertisers per SERP, which widens
+ * the click/harvest target pool.
+ */
+const SCHEDULED_GENERIC = ["deneme bonusu", "casino siteleri", "canlı bahis", "bahis siteleri", "slot siteleri"];
 const SCHEDULED_INTERVAL_HOURS = 2;
 const SCHEDULED_FIRST_HOUR = 6;
 
@@ -1454,6 +1461,12 @@ export function createWebServer(port: number): void {
           opts.expandBrands === true
             ? expandBrandKeywords(opts.brands, opts.scheduled ? SCHEDULED_SLIM_SUFFIXES : undefined)
             : opts.brands;
+        // Scheduled scans also probe the generic high-volume auctions (raw,
+        // unexpanded) so the target pool is not limited to client-brand SERPs.
+        if (opts.scheduled) {
+          const seen = new Set(keywords);
+          for (const g of SCHEDULED_GENERIC) if (!seen.has(g)) keywords.push(g);
+        }
         const totalKeywords = keywords.length;
 
         emitEvent({
