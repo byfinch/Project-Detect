@@ -971,12 +971,11 @@ export function createWebServer(port: number): void {
           const cooling = !!(r.next_retry_at && String(r.next_retry_at) > nowIso);
           const lastChangeMs = r.updated_at ? Date.parse(String(r.updated_at)) : 0;
           const recentFail = lastChangeMs > 0 && nowMs - lastChangeMs < RECENT_FAIL_MS;
-          const displayStatus =
-            rawStatus === "captcha" || rawStatus === "quarantined"
-              ? cooling || recentFail
-                ? rawStatus
-                : "usable";
-              : rawStatus;
+          let displayStatus = rawStatus;
+          // Stale one-off failure (no active cooldown, nothing in 48h) = usable.
+          if ((rawStatus === "captcha" || rawStatus === "quarantined") && !cooling && !recentFail) {
+            displayStatus = "usable";
+          }
           return {
             id: String(r.profile_id),
             name: String(r.name || r.profile_id),
