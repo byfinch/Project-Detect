@@ -428,6 +428,7 @@ async function scanOneKeyword(
     captchaProxy: captchaProxy
       ? { proxy: captchaProxy.proxy, proxytype: captchaProxy.proxytype }
       : undefined,
+    profileId,
   };
   const profileName = ctx.profileNames.get(profileId) || profileId;
   onProgress?.({
@@ -746,8 +747,8 @@ async function runDeviceScan(
         }
         const px = pool.proxies.get(candidate);
         const captchaOpts = px
-          ? { captchaProxy: { proxy: px.proxy, proxytype: px.proxytype } }
-          : {};
+          ? { captchaProxy: { proxy: px.proxy, proxytype: px.proxytype }, profileId: candidate }
+          : { profileId: candidate };
         // HARD RULE: never open brand SERP cold. Trend (or solve on trend) first,
         // then mark profile ready for keywords like herabet.
         throwIfAborted("openNext warm-up");
@@ -956,8 +957,8 @@ async function runDeviceScan(
           });
           try {
             const captchaOpts = proxy
-              ? { captchaProxy: { proxy: proxy.proxy, proxytype: proxy.proxytype } }
-              : {};
+              ? { captchaProxy: { proxy: proxy.proxy, proxytype: proxy.proxytype }, profileId }
+              : { profileId };
             const safeNav = await withScanStepCap(
               recoverViaTrendClick(state.session!, config, captchaOpts),
               `safe-trend ${pname}`

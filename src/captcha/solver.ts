@@ -45,6 +45,8 @@ export interface RecaptchaSolveResult {
   /** How long we waited for the worker (ms). Google data-s ages hard after ~100s. */
   waitMs?: number;
   provider?: "2captcha" | "capsolver";
+  /** solver_calls row id for this token — policy records the outcome against it. */
+  solverCallId?: number | null;
 }
 
 export interface MultiProviderSolveOpts extends RecaptchaSolveOpts {
@@ -264,10 +266,11 @@ async function solveViaApiV2(
       }
       const waitMs = Date.now() - started;
       logger.info({ jobId: taskId, waitMs, tokenLen: token.length }, "2captcha token ready");
+      let solverCallId: number | null = null;
       try {
         const { loadConfig } = await import("../config.js");
         const { logSolverCall } = await import("../report/solverCost.js");
-        logSolverCall(loadConfig().output.dir, {
+        solverCallId = logSolverCall(loadConfig().output.dir, {
           provider: "2captcha",
           taskType: opts.enterprise ? "recaptcha-enterprise" : "recaptcha",
           status: "solved",
@@ -276,7 +279,7 @@ async function solveViaApiV2(
       } catch {
         /* cost log optional */
       }
-      return { token, jobId: taskId, via: "api_v2", cookies, waitMs };
+      return { token, jobId: taskId, via: "api_v2", cookies, waitMs, solverCallId };
     }
     await sleep(pollMs);
   }
@@ -481,10 +484,11 @@ async function solveViaCapSolver(
       }
       const waitMs = Date.now() - started;
       logger.info({ jobId: taskId, waitMs, tokenLen: token.length }, "CapSolver token ready");
+      let solverCallId: number | null = null;
       try {
         const { loadConfig } = await import("../config.js");
         const { logSolverCall } = await import("../report/solverCost.js");
-        logSolverCall(loadConfig().output.dir, {
+        solverCallId = logSolverCall(loadConfig().output.dir, {
           provider: "capsolver",
           taskType: opts.enterprise ? "recaptcha-enterprise" : "recaptcha",
           status: "solved",
@@ -493,7 +497,7 @@ async function solveViaCapSolver(
       } catch {
         /* cost log optional */
       }
-      return { token, jobId: taskId, via: "capsolver", waitMs, provider: "capsolver" };
+      return { token, jobId: taskId, via: "capsolver", waitMs, provider: "capsolver", solverCallId };
     }
     // status processing
     await sleep(pollMs);
@@ -564,6 +568,17 @@ export async function solveRecaptchaMulti(
           : ["2captcha"];
 
   for (const p of order) {
+    // Circuit breaker: paused providers are skipped (distrust-wave economics).
+    try {
+      const { loadConfig } = await import("../config.js");
+      const { getCaptchaPolicy } = await import("./policy.js");
+      if (!getCaptchaPolicy(loadConfig()).providerAllowed(p)) {
+        logger.warn({ provider: p }, "solver provider paused by circuit breaker — skipping");
+        continue;
+      }
+    } catch {
+      /* policy optional */
+    }
     if (p === "capsolver") {
       if (!capKey) continue;
       logger.info({ provider: "capsolver" }, "trying captcha provider");

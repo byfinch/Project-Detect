@@ -42,6 +42,8 @@ export interface SerpNavOptions {
     proxy: string;
     proxytype: "HTTP" | "HTTPS" | "SOCKS4" | "SOCKS5";
   };
+  /** AdsPower profile id — feeds the captcha policy gates (budget/attempts). */
+  profileId?: string;
 }
 
 export function buildSerpUrl(config: AppConfig, keyword: string, start = 0): string {
@@ -143,7 +145,8 @@ async function tryDismissConsent(page: Page): Promise<boolean> {
 export async function attemptCaptchaSolve(
   page: Page,
   config: AppConfig,
-  captchaProxy?: SerpNavOptions["captchaProxy"]
+  captchaProxy?: SerpNavOptions["captchaProxy"],
+  profileId?: string
 ): Promise<boolean> {
   const hasSolverKey = !!(config.captcha.capSolverApiKey || config.captcha.twoCaptchaApiKey || config.captcha.apiKey);
   if (!config.captcha.enabled || !hasSolverKey) {
@@ -157,31 +160,53 @@ export async function attemptCaptchaSolve(
     );
     return false;
   }
+
+  // Economics gate: budget / distrust-wave pause / per-profile daily wall cap.
+  const { getCaptchaPolicy } = await import("../captcha/policy.js");
+  const policy = getCaptchaPolicy(config);
+  const gate = policy.shouldSolve(profileId);
+  if (!gate.ok) {
+    logger.warn({ profileId, reason: gate.reason }, "captcha policy: wall will NOT be solved — straight to cooldown");
+    policy.recordWallClosed(profileId, false, 0);
+    return false;
+  }
+  const attemptCap = Math.min(RECAPTCHA_MAX_ATTEMPTS, gate.maxAttempts);
+  let paidAttempts = 0;
+  let wallCleared = false;
+
   try {
     // Private dedicated ISP IPs: recover fully. Prefer reCAPTCHA (2captcha Google docs).
     // Image is secondary; after image try, reload for a chance at reCAPTCHA again.
     let imageTries = 0;
     let recaptchaTries = 0;
-    const maxLoops = RECAPTCHA_MAX_ATTEMPTS + IMAGE_MAX_ATTEMPTS + 2;
+    const maxLoops = attemptCap + IMAGE_MAX_ATTEMPTS + 2;
     for (let attempt = 1; attempt <= maxLoops; attempt++) {
       await waitForCaptchaMarkup(page);
       if (await isRealSerp(page)) {
         await logAbuseExemption(page, "pre-check");
+        wallCleared = true;
         return true;
       }
       if (!(await pageLooksLikeCaptcha(page))) {
-        if (await isRealSerp(page)) return true;
+        if (await isRealSerp(page)) {
+          wallCleared = true;
+          return true;
+        }
       }
 
       const hasRecaptcha = await page.$(".g-recaptcha[data-sitekey], iframe[src*='recaptcha']").then((h) => !!h);
       if (hasRecaptcha) {
-        if (recaptchaTries >= RECAPTCHA_MAX_ATTEMPTS) {
-          logger.warn({ attempt, recaptchaTries }, "reCAPTCHA attempts exhausted");
+        if (recaptchaTries >= attemptCap) {
+          logger.warn({ attempt, recaptchaTries, attemptCap }, "reCAPTCHA attempts exhausted (policy cap)");
           return false;
         }
         recaptchaTries += 1;
-        const ok = await solveRecaptchaOnce(page, config, attempt, captchaProxy);
-        if (ok) return true;
+        paidAttempts += 1;
+        const ok = await solveRecaptchaOnce(page, config, attempt, captchaProxy, profileId);
+        if (ok) {
+          wallCleared = true;
+          return true;
+        }
         // 2captcha: never reuse data-s — always fresh challenge.
         await reloadCaptchaPage(page);
         continue;
@@ -190,7 +215,7 @@ export async function attemptCaptchaSolve(
       const hasImage = await page.$('input[name="captcha"]').then((h) => !!h);
       if (hasImage) {
         // Prefer reCAPTCHA: first hit on pure-image, reload once to try mint reCAPTCHA.
-        if (imageTries === 0 && recaptchaTries < RECAPTCHA_MAX_ATTEMPTS) {
+        if (imageTries === 0 && recaptchaTries < attemptCap) {
           logger.info({ attempt }, "image wall — reloading once to prefer reCAPTCHA challenge");
           await reloadCaptchaPage(page);
           const upgraded = await page.$(".g-recaptcha[data-sitekey], iframe[src*='recaptcha']").then((h) => !!h);
@@ -202,7 +227,10 @@ export async function attemptCaptchaSolve(
         }
         imageTries += 1;
         const ok = await solveImageOnce(page, config, attempt);
-        if (ok) return true;
+        if (ok) {
+          wallCleared = true;
+          return true;
+        }
         logger.warn({ attempt, imageTries }, "image OCR failed — reloading for next challenge type");
         await reloadCaptchaPage(page);
         continue;
@@ -215,6 +243,8 @@ export async function attemptCaptchaSolve(
   } catch (err) {
     logger.warn({ err: String(err) }, "captcha solve attempt failed");
     return false;
+  } finally {
+    policy.recordWallClosed(profileId, wallCleared, paidAttempts);
   }
 }
 
@@ -403,7 +433,8 @@ async function solveRecaptchaOnce(
   page: Page,
   config: AppConfig,
   attempt: number,
-  captchaProxy?: SerpNavOptions["captchaProxy"]
+  captchaProxy?: SerpNavOptions["captchaProxy"],
+  profileId?: string
 ): Promise<boolean> {
   const rc = await extractRecaptchaParams(page);
   if (!rc.key) {
@@ -523,7 +554,18 @@ async function solveRecaptchaOnce(
   }
 
   const cleared = await submitRecaptchaToken(page, solved.token, rc);
+  // Policy outcome: one paid token consumed — cleared or persisted (breaker input).
+  const recordOutcome = async (outcome: "cleared" | "persisted") => {
+    try {
+      const { getCaptchaPolicy } = await import("../captcha/policy.js");
+      const provider = solved.provider ?? (solved.via === "capsolver" ? "capsolver" : "2captcha");
+      getCaptchaPolicy(config).recordSolve(profileId, provider, outcome, solved.solverCallId);
+    } catch {
+      /* policy optional */
+    }
+  };
   if (cleared) {
+    await recordOutcome("cleared");
     logger.info(
       {
         attempt,
@@ -543,10 +585,13 @@ async function solveRecaptchaOnce(
   if (rc.continueUrl) {
     const late = await tryFollowContinueUrl(page, rc.continueUrl, "reCAPTCHA/late-continue");
     if (late) {
+      await recordOutcome("cleared");
       logger.info({ attempt, variant: variant.label }, "captcha cleared on late continue after token");
       return true;
     }
   }
+
+  await recordOutcome("persisted");
 
   logger.warn(
     {
@@ -1264,7 +1309,7 @@ async function finishSerpNav(
   let captchaSolved = false;
   if (captcha) {
     logger.warn({ ...logCtx, url: page.url().slice(0, 160), hasProxy: !!opts.captchaProxy }, "Google CAPTCHA / sorry wall detected");
-    captchaSolved = await attemptCaptchaSolve(page, config, opts.captchaProxy);
+    captchaSolved = await attemptCaptchaSolve(page, config, opts.captchaProxy, opts.profileId);
     if (captchaSolved) {
       await settleSerp(page);
       if (!(await isRealSerp(page))) {
@@ -1861,7 +1906,7 @@ export async function recoverViaTrendClick(
 
     if (wall) {
       // Real wall on home: try solve on current page (rare on pure home)
-      const captchaSolved = await attemptCaptchaSolve(page, config, opts.captchaProxy);
+      const captchaSolved = await attemptCaptchaSolve(page, config, opts.captchaProxy, opts.profileId);
       if (!captchaSolved) {
         return { captcha: true, captchaSolved: false, finalUrl: page.url(), trend: "" };
       }
@@ -1952,7 +1997,7 @@ export async function recoverViaTrendClick(
       { trend: pickText, hasProxy: !!opts.captchaProxy },
       "captcha after trend/soft warm-up — solving (natural entry path)"
     );
-    captchaSolved = await attemptCaptchaSolve(page, config, opts.captchaProxy);
+    captchaSolved = await attemptCaptchaSolve(page, config, opts.captchaProxy, opts.profileId);
     if (captchaSolved) {
       await settleSerp(page);
       if (!(await isRealSerp(page))) {

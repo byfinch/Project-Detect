@@ -14,6 +14,7 @@ import { expandBrandKeywords } from "../util/keywords.js";
 import { buildAdComplaintPack } from "../report/adComplaintPack.js";
 import { getEmailPool } from "../report/emailPool.js";
 import { solverCostSummary } from "../report/solverCost.js";
+import { getCaptchaPolicy } from "../captcha/policy.js";
 
 import { logger } from "../logger.js";
 import type { Device } from "../types.js";
@@ -896,6 +897,13 @@ export function createWebServer(port: number): void {
           campaign: activeCampaign,
           scheduledScan: { ...scheduledScan, scanRunning: isScanRunning() },
           solverCost: solverCostSummary(config.output.dir),
+          solverPolicy: (() => {
+            try {
+              return getCaptchaPolicy(config).stats();
+            } catch {
+              return null;
+            }
+          })(),
           config: {
             scanConcurrency: config.scan.concurrency,
             clickConcurrency: config.click.concurrency,

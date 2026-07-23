@@ -26,6 +26,26 @@ const ConfigSchema = z.object({
     apiKey: z.string(),
     twoCaptchaApiKey: z.string().default(""),
     capSolverApiKey: z.string().default(""),
+    /**
+     * Solver economics (see captcha/policy.ts). Paid solves are capped per
+     * hour/day; providers with a collapsing wall-clear rate are paused; a
+     * profile gets fewer attempts the more walls it has already burned today.
+     */
+    budget: z
+      .object({
+        maxSolvesPerHour: z.number().int().positive().default(40),
+        maxSolvesPerDay: z.number().int().positive().default(250),
+        /** Pause a provider when clear-rate over the window drops below this. */
+        minClearRate: z.number().min(0).max(1).default(0.15),
+        /** Samples needed before the clear-rate breaker may trip. */
+        breakerMinSamples: z.number().int().positive().default(8),
+        /** How long a tripped provider (or global) pause lasts, minutes. */
+        breakerPauseMinutes: z.number().int().positive().default(30),
+        /** Attempts allowed on a profile's 1st / 2nd wall of the day (3rd+: no solve). */
+        attemptsFirstWall: z.number().int().positive().default(2),
+        attemptsSecondWall: z.number().int().positive().default(1),
+      })
+      .default({}),
   }),
   google: z.object({
     domain: z.string(),
@@ -197,6 +217,15 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       apiKey: process.env.TWOCAPTCHA_API_KEY ?? "",
       twoCaptchaApiKey: process.env.TWOCAPTCHA_API_KEY ?? "",
       capSolverApiKey: process.env.CAPSOLVER_API_KEY ?? "",
+      budget: {
+        maxSolvesPerHour: file.captcha?.budget?.maxSolvesPerHour ?? 40,
+        maxSolvesPerDay: file.captcha?.budget?.maxSolvesPerDay ?? 250,
+        minClearRate: file.captcha?.budget?.minClearRate ?? 0.15,
+        breakerMinSamples: file.captcha?.budget?.breakerMinSamples ?? 8,
+        breakerPauseMinutes: file.captcha?.budget?.breakerPauseMinutes ?? 30,
+        attemptsFirstWall: file.captcha?.budget?.attemptsFirstWall ?? 2,
+        attemptsSecondWall: file.captcha?.budget?.attemptsSecondWall ?? 1,
+      },
     },
     google: {
       domain: file.google?.domain ?? "www.google.com",

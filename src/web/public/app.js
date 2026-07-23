@@ -287,8 +287,18 @@ async function refresh(force = false) {
     if (jp) jp.textContent = `${running} iş`;
     const sp = document.getElementById("pill-solver");
     if (sp && ops.solverCost) {
-      sp.textContent = `$${ops.solverCost.today} bugün · $${ops.solverCost.last7d} 7g`;
-      sp.title = `Solver maliyeti · bugün ${ops.solverCost.todayCalls} çağrı · 7 günde ${ops.solverCost.weekCalls} çağrı`;
+      const pol = ops.solverPolicy;
+      const budgetTxt = pol ? ` · bütçe ${pol.hourSolves}/${pol.hourBudget} saat` : "";
+      const pausedTxt = pol && (pol.pausedProviders.length || pol.globalPausedUntil) ? " · ⏸" : "";
+      sp.textContent = `$${ops.solverCost.today} bugün · $${ops.solverCost.last7d} 7g${budgetTxt}${pausedTxt}`;
+      const lines = [`Solver maliyeti · bugün ${ops.solverCost.todayCalls} çağrı · 7 günde ${ops.solverCost.weekCalls} çağrı`];
+      if (pol) {
+        lines.push(`Duvar: ${pol.todayWalls} · aşılan: ${pol.todayCleared} · başarı %${Math.round(pol.clearRateToday * 100)}`);
+        lines.push(`Bütçe: ${pol.hourSolves}/${pol.hourBudget} saatlik · ${pol.todaySolves}/${pol.dayBudget} günlük`);
+        if (pol.globalPausedUntil) lines.push(`GLOBAL PAUSE: ${pol.globalPausedUntil}`);
+        if (pol.pausedProviders.length) lines.push(`Duraklatılan: ${pol.pausedProviders.join(", ")}`);
+      }
+      sp.title = lines.join("\n");
     }
     isScanRunningFromOps = isScanRunning(ops.jobs);
     updateOps(ops);

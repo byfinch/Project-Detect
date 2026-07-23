@@ -27,18 +27,22 @@ function open(outputDir: string): DatabaseSync {
 export function logSolverCall(
   outputDir: string,
   entry: { provider: "2captcha" | "capsolver"; taskType: string; status: "solved" | "failed"; cost?: number | null }
-): void {
+): number | null {
   try {
     const db = open(outputDir);
     try {
-      db.prepare(
-        `INSERT INTO solver_calls (provider, task_type, status, cost, created_at) VALUES (?, ?, ?, ?, ?)`
-      ).run(entry.provider, entry.taskType, entry.status, entry.cost ?? null, new Date().toISOString());
+      const res = db
+        .prepare(
+          `INSERT INTO solver_calls (provider, task_type, status, cost, created_at) VALUES (?, ?, ?, ?, ?)`
+        )
+        .run(entry.provider, entry.taskType, entry.status, entry.cost ?? null, new Date().toISOString());
+      return Number(res.lastInsertRowid);
     } finally {
       db.close();
     }
   } catch (err) {
     logger.debug({ err: String(err) }, "solver cost log failed (ignored)");
+    return null;
   }
 }
 

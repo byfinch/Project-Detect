@@ -147,13 +147,39 @@ async function openProfile(ctx: WorkerContext, profileId: string, device: Device
       const { applyMobileEmulation } = await import("../browser/mobileEmulation.js");
       await applyMobileEmulation(session.page);
     }
+    // Trusted fast-path: vault says this profile was clean/solved <2h ago —
+    // skip the ~25-30s trend warm-up and go straight to the SERP. A wall, if
+    // one appears anyway, is handled by the normal captcha flow downstream.
+    let trustedRecently = false;
+    try {
+      const { Store } = await import("../store/db.js");
+      const vault = new Store(ctx.config.output.dir);
+      try {
+        const row = vault.ipTrust.get(profileId) as
+          | { status?: string; lastCleanAt?: string | null; lastSolvedAt?: string | null }
+          | undefined;
+        const fresh = (iso?: string | null) => !!iso && Date.now() - new Date(iso).getTime() < 2 * 3_600_000;
+        trustedRecently = row?.status === "usable" && (fresh(row?.lastCleanAt) || fresh(row?.lastSolvedAt));
+      } finally {
+        vault.close();
+      }
+    } catch {
+      /* vault optional */
+    }
+
     // Same rule as brand scan: trend (or solve) first — never cold brand SERP.
     const proxy = ctx.profileMeta.get(profileId);
     const captchaProxy = proxy ? captchaProxyFromProfile(proxy) : undefined;
+    if (trustedRecently) {
+      logger.info({ profileId }, "click worker: vault-trusted profile — trend warm-up skipped (fast path)");
+      markProfileInUse(profileId);
+      return session;
+    }
     const warm = await warmUp(session, ctx.config, {
       captchaProxy: captchaProxy
         ? { proxy: captchaProxy.proxy, proxytype: captchaProxy.proxytype }
         : undefined,
+      profileId,
       trendWarmup: true,
     });
     if (warm.captcha) {
@@ -341,6 +367,7 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
       captchaProxy: captchaProxy
         ? { proxy: captchaProxy.proxy, proxytype: captchaProxy.proxytype }
         : undefined,
+      profileId: job.profileId,
     });
 
     if (nav.captcha) {
@@ -717,7 +744,7 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
     if (!targetAd) {
       // Target not on this SERP — but other ads may exist. Harvest them instead
       // of walking away (they are betting ads for the same keyword).
-      const harvestable = uniqueAds(ads).filter((a) => a.adHref && !isCooling(a.displayDomain)).slice(0, 3);
+      const harvestable = uniqueAds(ads).filter((a) => a.adHref && !isCooling(a.displayDomain)).slice(0, 4);
       if (harvestable.length === 0) {
         status = "skipped";
         error = `target ad not found for domain ${job.targetDomain}`;
@@ -781,7 +808,7 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
       .filter((a) => a.adHref)
       .filter((a) => (a.displayDomain || "").toLowerCase().replace(/^www\./, "") !== (targetAd.displayDomain || "").toLowerCase().replace(/^www\./, ""))
       .filter((a) => !isCooling(a.displayDomain))
-      .slice(0, 3);
+      .slice(0, 4);
     for (let i = 0; i < extras.length; i++) {
       const extra = toClickable(extras[i]!);
       const extraJob: ClickJob = { ...job, id: `${job.id}-h${i}`, targetDomain: extra.displayDomain, targetTitle: extra.title };
