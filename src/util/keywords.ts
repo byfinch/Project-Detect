@@ -31,8 +31,10 @@ export function loadKeywords(path: string): string[] {
  *
  * The original brand is always included. Turkish suffixes such as
  * "giriş", "güncel giriş", "yeni adres" etc. are appended to each brand.
+ * A custom suffix list can slim the expansion (scheduled scans use fewer
+ * variants to protect the 2h cadence and IP budget).
  */
-export function expandBrandKeywords(brands: string[]): string[] {
+export function expandBrandKeywords(brands: string[], suffixes: string[] = BRAND_SUFFIXES): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
 
@@ -40,7 +42,7 @@ export function expandBrandKeywords(brands: string[]): string[] {
     const base = brand.trim();
     if (!base) continue;
 
-    const variations = [base, ...BRAND_SUFFIXES.map((s) => `${base} ${s}`)];
+    const variations = [base, ...suffixes.map((s) => `${base} ${s}`)];
     for (const v of variations) {
       const key = v.toLocaleLowerCase("tr");
       if (seen.has(key)) continue;

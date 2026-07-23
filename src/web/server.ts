@@ -65,6 +65,8 @@ function createJobId(type: string): string {
 }
 
 const SCHEDULED_BRANDS = ["herabet", "rovbet", "napolibet", "primebahis", "vegasslot"];
+/** Slim variant set for scheduled scans: base + 3 suffixes = 4 keywords/brand. */
+const SCHEDULED_SLIM_SUFFIXES = ["giriş", "güncel adres", "bonus"];
 const SCHEDULED_INTERVAL_HOURS = 2;
 const SCHEDULED_FIRST_HOUR = 6;
 
@@ -1434,7 +1436,12 @@ export function createWebServer(port: number): void {
         cfg.scan.clearProfileData = opts.clearProfile === true;
         cfg.scan.queriesPerProfile = 1;
 
-        let keywords = opts.expandBrands === true ? expandBrandKeywords(opts.brands) : opts.brands;
+        // Scheduled scans use a slim variant set (4 keywords/brand) to protect
+        // the 2h cadence and IP budget; manual "Varyant ekle" keeps the full 9.
+        let keywords =
+          opts.expandBrands === true
+            ? expandBrandKeywords(opts.brands, opts.scheduled ? SCHEDULED_SLIM_SUFFIXES : undefined)
+            : opts.brands;
         const totalKeywords = keywords.length;
 
         emitEvent({
@@ -1667,7 +1674,7 @@ export function createWebServer(port: number): void {
           const jobId = startScanJob({
             brands: SCHEDULED_BRANDS,
             devices: "both",
-            expandBrands: false,
+            expandBrands: true, // slim variants (4 kw/brand) — more ad auctions per scan
             auto: true,
             scheduled: true,
           });
