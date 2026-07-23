@@ -255,6 +255,19 @@ export async function parseAds(page: Page, labelTokens: string[] = AD_LABEL_TOKE
           displayDomain = sm[1]!;
         }
       }
+      // App-install ad cards ("Google Play" label + install CTA) carry no
+      // domain text and often no store link in the DOM — label them as the
+      // store itself instead of leaving the domain "unknown".
+      if (!displayDomain) {
+        const cardText = (c.textContent || "").toLowerCase();
+        if (cardText.includes("google play")) {
+          displayDomain = "play.google.com";
+          displayUrl = "play.google.com";
+        } else if (cardText.includes("app store")) {
+          displayDomain = "apps.apple.com";
+          displayUrl = "apps.apple.com";
+        }
+      }
       if (!displayDomain && adHref) {
         try {
           const host = new URL(adHref, location.href).hostname.replace(/^www\./, "");
