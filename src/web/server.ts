@@ -154,7 +154,10 @@ function getNextScheduledSlot(from = new Date()): Date {
   const gridStep = SCHEDULED_INTERVAL_HOURS * 60 * 60 * 1000;
   const firstSlot = dayStart.getTime() + SCHEDULED_FIRST_HOUR * 60 * 60 * 1000;
   const elapsed = from.getTime() - firstSlot;
-  const stepsAhead = Math.max(1, Math.ceil(elapsed / gridStep));
+  // floor+1 (not ceil, not max(1,…)): works for negative elapsed too, so the
+  // wrapped overnight slots (00/02/04 TR, i.e. before this TR day's 06:00
+  // anchor) fire correctly and a just-upcoming anchor slot is not skipped.
+  const stepsAhead = Math.floor(elapsed / gridStep) + 1;
   return new Date(firstSlot + stepsAhead * gridStep);
 }
 
