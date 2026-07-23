@@ -545,6 +545,7 @@ export async function fillReportForm(
     logger.warn("autoReport: no email configured — form may not submit");
   }
   await takeShot("03-report-filled");
+  logger.info("autoReport: filled shot done — submitting");
 
   if (!submit) {
     return { status: "filled", shots };
@@ -568,6 +569,7 @@ export async function fillReportForm(
     }
     return { found: false, disabled: false };
   }).catch(() => ({ found: false, disabled: false }));
+  logger.info({ gonderResult }, "autoReport: submit click evaluated");
 
   if (!gonderResult.found) {
     logger.warn("autoReport: Gönder button not found");
@@ -579,6 +581,7 @@ export async function fillReportForm(
   }
   await sleep(4000);
   await takeShot("04-report-submitted");
+  logger.info("autoReport: submitted shot done — verifying");
 
   // 4) Verify submission: dialog closes or confirmation text appears.
   const verify = await page.evaluate(() => {
@@ -587,6 +590,7 @@ export async function fillReportForm(
     if (!visible) return { closed: true, text: "" };
     return { closed: false, text: (visible.textContent || "").toLowerCase() };
   }).catch(() => ({ closed: false, text: "" }));
+  logger.info({ closed: verify.closed, textHead: verify.text.slice(0, 60) }, "autoReport: verify evaluated");
 
   if (verify.closed) return { status: "submitted", shots };
   const t = verify.text;
