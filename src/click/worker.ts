@@ -493,6 +493,20 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
       // 2) Report on the SAME fresh impression — with the resolved evidence.
       rep = await maybeReportAdBeforeClick(ctx, page, jobForRecord, currentAd, preEvidence);
 
+      // Renderer liveness probe (5s): the report flow (or an intent:// redirect
+      // from a previous ad) can leave the renderer frozen — every later call
+      // then burns its own cap and the job dies as "failed" after minutes
+      // (seen live on the app:casibom mobile leg). Report is already out;
+      // skip the click cheaply instead of wedging the slot.
+      const rendererAlive = await Promise.race([
+        page.evaluate(() => 1).then(() => true, () => false),
+        sleep(5_000).then(() => false),
+      ]);
+      if (!rendererAlive) {
+        logger.warn({ jobId: jobForRecord.id, domain: currentAd.displayDomain }, "click worker: renderer frozen before click phase — skipping click (report already out)");
+        return { status: "skipped", error: "renderer frozen before click (intent redirect?)", evidence: ev, reportResult: rep };
+      }
+
       // aclkFired: Google registers the click the moment the aclk is followed —
       // a landing error afterwards does NOT un-click it (and must still count).
       let aclkFired = false;
