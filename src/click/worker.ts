@@ -499,7 +499,14 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
       //    journey, with the resolved betting domain already as evidence.
       const preEvidence: { finalUrl?: string | null; finalDomain?: string | null } = {};
       try {
-        const outcome = await resolveLanding(sess, currentAd.adHref, {
+        // intent:// hrefs can't be resolved/navigated — resolve the HTTPS Play
+        // page instead so the report carries real landing evidence.
+        let resolveHref = currentAd.adHref;
+        if (resolveHref.startsWith("intent://")) {
+          const pkg = appAdPackage(resolveHref);
+          if (pkg) resolveHref = `https://play.google.com/store/apps/details?id=${pkg}&hl=tr&gl=tr`;
+        }
+        const outcome = await resolveLanding(sess, resolveHref, {
           hopCap: ctx.config.scan.hopCap,
           timeoutMs: Math.min(20_000, ctx.config.scan.resolveTimeoutMs),
           referer: `https://${ctx.config.google.domain}/`,

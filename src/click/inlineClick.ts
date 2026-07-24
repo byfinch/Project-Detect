@@ -375,7 +375,14 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
           let preFinalDomain: string | null = null;
           try {
             const { resolveLanding } = await import("../resolve/redirectResolver.js");
-            const outcome = await resolveLanding(session, ad.adHref, {
+            // intent:// hrefs can't be resolved — use the HTTPS Play page.
+            let resolveHref = ad.adHref!;
+            if (resolveHref.startsWith("intent://")) {
+              const { appAdPackage } = await import("../util/appAds.js");
+              const pkg = appAdPackage(resolveHref);
+              if (pkg) resolveHref = `https://play.google.com/store/apps/details?id=${pkg}&hl=tr&gl=tr`;
+            }
+            const outcome = await resolveLanding(session, resolveHref, {
               hopCap: config.scan.hopCap,
               timeoutMs: Math.min(20_000, config.scan.resolveTimeoutMs),
               referer: `https://${config.google.domain}/`,
