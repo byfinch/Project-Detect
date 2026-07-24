@@ -790,17 +790,20 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
       }
 
       // 1:1 guarantee — the report failed on this impression (no-form /
-      // submit-failed / wedged opener) but the click landed. ONE bounded
-      // retry on a FRESH impression: re-search the keyword, re-locate the ad,
-      // report only. Google rotates cards, so the fresh card usually has the
-      // menu again. Naturalness preserved: single retry, same profile, new SERP.
-      if (
+      // submit-failed / wedged opener) but the click landed. Up to TWO bounded
+      // retries on FRESH impressions: re-search the keyword, re-locate the ad,
+      // report only. Google rotates cards, so a fresh card usually has the
+      // menu again. Naturalness preserved: same profile, new SERP per attempt.
+      for (
+        let retryNo = 1;
+        retryNo <= 2 &&
         st === "success" &&
         ctx.config.report.autoSerpSubmit &&
-        (rep.status === "no-form" || rep.status === "submit-failed" || rep.status === "error" || rep.status === "skipped")
+        (rep.status === "no-form" || rep.status === "submit-failed" || rep.status === "error" || rep.status === "skipped");
+        retryNo++
       ) {
         try {
-          logger.info({ jobId: jobForRecord.id, domain: currentAd.displayDomain, prev: rep.status }, "report retry on fresh impression");
+          logger.info({ jobId: jobForRecord.id, domain: currentAd.displayDomain, prev: rep.status, retryNo }, "report retry on fresh impression");
           await page.goto(serpUrl, { waitUntil: "domcontentloaded", timeout: 25000 }).catch(() => {});
           await sleep(1200);
           const retryAds = await parseAds(page);
@@ -816,6 +819,10 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
             });
             if (retryRep.status === "submitted" || retryRep.status === "filled") {
               rep = retryRep;
+              ctx.store.upsertReportOutcome(ctx.runId, jobForRecord, rep);
+            } else if (retryNo === 2) {
+              // Second form also failed — record honestly why the pair broke.
+              rep = { status: retryRep.status, message: `2 retry da başarısız: ${retryRep.message ?? retryRep.status}` };
               ctx.store.upsertReportOutcome(ctx.runId, jobForRecord, rep);
             }
           } else {
