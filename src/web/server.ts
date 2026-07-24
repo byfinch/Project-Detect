@@ -1915,6 +1915,80 @@ export function createWebServer(port: number): void {
 
   startIdleProfileReaper();
 
+  /**
+   * Profile supervisor — the system knows its own profiles.
+   *
+   * Every 90s, when NO job is running:
+   *  - vault'due' profiles (cooldown expired, status captcha/quarantined) get a
+   *    bounded recovery pass (max 3, every ≥15 min): trend warm-up → back to
+   *    the usable pool instead of rotting in cooldown.
+   * Stuck-in-job profiles are handled by the in-band guards (scan wedge guard,
+   * engine caps); orphans by the reaper above. This closes the loop: nothing
+   * sits broken and unnoticed.
+   */
+  function startProfileSupervisor(): void {
+    const TICK_MS = 90_000;
+    const RECOVERY_MIN_GAP_MS = 15 * 60_000;
+    let lastRecoveryAt = 0;
+    let recoveryInFlight = false;
+
+    setInterval(async () => {
+      try {
+        if (recoveryInFlight) return;
+        const busy =
+          activeCampaign?.status === "running" ||
+          Array.from(jobs.values()).some((j) => j.status === "running");
+        if (busy) return;
+        if (Date.now() - lastRecoveryAt < RECOVERY_MIN_GAP_MS) return;
+
+        const { Store } = await import("../store/db.js");
+        const store = new Store(config.output.dir);
+        let dueIds: string[];
+        try {
+          dueIds = store.ipTrust.listDueForRecovery().map((r) => r.profileId);
+        } finally {
+          store.close();
+        }
+        if (dueIds.length === 0) return;
+
+        recoveryInFlight = true;
+        lastRecoveryAt = Date.now();
+        // Mark recovery targets in-use so the idle reaper can't kill their
+        // browsers mid-pass (recovery opens them without the worker registry).
+        const { markProfileInUse, releaseProfile } = await import("../browser/profileRegistry.js");
+        for (const id of dueIds.slice(0, 3)) markProfileInUse(id);
+        try {
+          logger.info({ due: dueIds.length }, "supervisor: idle — recovering due profiles (max 3)");
+          emitEvent({
+            type: "supervisor-recovery",
+            count: dueIds.length,
+            message: `Supervisor: ${dueIds.length} profil cooldown'da · 3 tanesi iyileştiriliyor (sistem boşta)`,
+          });
+          const { runRecoveryPass } = await import("../captcha/recovery.js");
+          const report = await runRecoveryPass(config, { limit: 3 });
+          logger.info(
+            { clean: report.clean, solved: report.captcha_solved, hard: report.captcha, err: report.error },
+            "supervisor: recovery pass done"
+          );
+          emitEvent({
+            type: "supervisor-recovery-done",
+            clean: report.clean,
+            solved: report.captcha_solved,
+            message: `Supervisor iyileştirme bitti · temiz ${report.clean} · çözüldü ${report.captcha_solved} · duvar ${report.captcha}`,
+          });
+        } finally {
+          for (const id of dueIds.slice(0, 3)) releaseProfile(id);
+        }
+      } catch (err) {
+        logger.debug({ err: String(err) }, "supervisor tick failed (ignored)");
+      } finally {
+        recoveryInFlight = false;
+      }
+    }, TICK_MS);
+  }
+
+  startProfileSupervisor();
+
   app.post("/api/scans/:id/click", async (req: Request, res: Response) => {
     const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const scanId = parseInt(idParam || "0", 10);
