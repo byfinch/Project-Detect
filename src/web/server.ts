@@ -2135,6 +2135,7 @@ export function createWebServer(port: number): void {
   });
 
   app.use((req: Request, res: Response) => {
+    res.setHeader("Cache-Control", "no-store");
     if (!hasSession(req)) {
       res.sendFile(resolve(PUBLIC_DIR, "login.html"));
       return;
