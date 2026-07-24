@@ -517,6 +517,19 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
       // 2) Report on the SAME fresh impression — with the resolved evidence.
       rep = await maybeReportAdBeforeClick(ctx, page, jobForRecord, currentAd, preEvidence);
 
+      // Dismiss the "Reklam Merkezim" overlay the report flow leaves open —
+      // the click phase needs a clean SERP DOM (no reload: same-impression rule).
+      await page.keyboard.press("Escape").catch(() => {});
+      await sleep(400);
+      await page.evaluate(() => {
+        const btns = Array.from(
+          document.querySelectorAll('[role="dialog"] [aria-label*="kapat" i], [role="dialog"] [aria-label*="close" i]')
+        ) as HTMLElement[];
+        for (const b of btns) {
+          if (b.getBoundingClientRect().width > 0) b.click();
+        }
+      }).catch(() => {});
+
       // Renderer liveness probe (5s): the report flow (or an intent:// redirect
       // from a previous ad) can leave the renderer frozen — every later call
       // then burns its own cap and the job dies as "failed" after minutes

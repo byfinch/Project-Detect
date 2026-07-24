@@ -420,6 +420,21 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
           } else {
             reportResult = { status: "no-form", message: "report UI not opened" };
           }
+          // The report flow leaves Google's "Reklam Merkezim" overlay OPEN when
+          // the URL never left google.* (seen live: popup covering the SERP, the
+          // click phase then crawls on a dirty DOM). Dismiss it — ESC first,
+          // then any dialog close buttons; NO reload (a reload re-runs the
+          // auction and can cost us the exact impression we just reported).
+          await page.keyboard.press("Escape").catch(() => {});
+          await sleep(400);
+          await page.evaluate(() => {
+            const btns = Array.from(
+              document.querySelectorAll('[role="dialog"] [aria-label*="kapat" i], [role="dialog"] [aria-label*="close" i]')
+            ) as HTMLElement[];
+            for (const b of btns) {
+              if (b.getBoundingClientRect().width > 0) b.click();
+            }
+          }).catch(() => {});
           // The report flow may have navigated — restore SERP before clicking.
           if (!page.url().includes("google.") || page.url().includes("/sorry")) {
             await page.goto(serpUrl, { waitUntil: "domcontentloaded", timeout: 25000 }).catch(() => {});
