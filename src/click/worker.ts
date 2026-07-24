@@ -523,6 +523,9 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
 
       // 2) Report on the SAME fresh impression — with the resolved evidence.
       rep = await maybeReportAdBeforeClick(ctx, page, jobForRecord, currentAd, preEvidence);
+      // Write-through: persist the report outcome NOW — a later job death
+      // (timeout/freeze) must not rewrite this as "error".
+      ctx.store.upsertReportOutcome(ctx.runId, jobForRecord, rep);
 
       // Dismiss the "Reklam Merkezim" overlay the report flow leaves open —
       // the click phase needs a clean SERP DOM (no reload: same-impression rule).
@@ -801,6 +804,7 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
             });
             if (retryRep.status === "submitted" || retryRep.status === "filled" || rep.status === "skipped") {
               rep = retryRep;
+              ctx.store.upsertReportOutcome(ctx.runId, jobForRecord, rep);
             }
           } else {
             logger.info({ jobId: jobForRecord.id, domain: currentAd.displayDomain }, "report retry: ad not on fresh SERP (rotated)");

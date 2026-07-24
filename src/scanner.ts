@@ -1172,7 +1172,31 @@ async function runDeviceScan(
       (async () => {
         // Short stagger only — long 0–30s delay looked like "stuck Preparing…".
         await sleep(w * 1500 + Math.floor(Math.random() * 1500));
+        /**
+         * Wedge guard (lesson: 3 silent legs in one day — browser open 15m+,
+         * zero logs). Steps have individual 6m caps, but stacked capped timeouts
+         * still leave a leg silent for ages. If THIS worker shows no loop
+         * progress for 7m with a browser open, force-close it: hung CDP calls
+         * reject, existing caps/catches unwind, the worker moves on.
+         */
+        let lastActivity = Date.now();
+        const bump = () => {
+          lastActivity = Date.now();
+        };
+        const wedgeGuard = setInterval(() => {
+          const silentMs = Date.now() - lastActivity;
+          if (state.profileId && silentMs > 7 * 60_000) {
+            logger.error(
+              { device, worker: w, profileId: state.profileId, silentMs },
+              "scan worker silent 7m+ — force-closing profile browser (wedge guard)"
+            );
+            void ads.stopBrowser(state.profileId).catch(() => {});
+            lastActivity = Date.now(); // one full window for the unwind
+          }
+        }, 30_000);
+        try {
         while (true) {
+          bump();
           if (swarmTarget) {
             await closeState(state);
             return;
@@ -1356,6 +1380,9 @@ async function runDeviceScan(
         }
 
         await closeState(state);
+        } finally {
+          clearInterval(wedgeGuard);
+        }
       })()
     );
   }

@@ -1,7 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import type { ClickResult, ClickStatus, TargetDevice } from "./types.js";
+import type { ClickJob, ClickReportResult, ClickResult, ClickStatus, TargetDevice } from "./types.js";
+import { logger } from "../logger.js";
 
 export interface ClickRunMeta {
   startedAt: string;
@@ -240,8 +241,81 @@ export class ClickStore {
     return n;
   }
 
+  /**
+   * Write-through report persistence: the moment a report resolves (submitted
+   * or failed), persist it. A job that dies AFTER a successful report (8m cap,
+   * renderer freeze, force-close) must never record that report as "error" —
+   * seen live: VNC showed the report, the panel showed nothing.
+   */
+  upsertReportOutcome(runId: number, job: ClickJob, report: ClickReportResult): void {
+    try {
+      const existing = this.db
+        .prepare("SELECT id, report_status FROM clicks WHERE run_id = ? AND job_id = ?")
+        .get(runId, job.id) as { id: number; report_status: string | null } | undefined;
+      if (existing) {
+        // Never downgrade an already-proven report.
+        if (["submitted", "filled"].includes(existing.report_status ?? "") && !["submitted", "filled"].includes(report.status)) return;
+        this.db
+          .prepare("UPDATE clicks SET report_status = ?, report_message = ? WHERE id = ?")
+          .run(report.status, report.message ?? null, existing.id);
+        return;
+      }
+      this.db
+        .prepare(
+          `INSERT INTO clicks (run_id, job_id, profile_id, device, keyword, target_domain, status, captured_at, report_status, report_message)
+           VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)`
+        )
+        .run(runId, job.id, job.profileId, job.device, job.keyword, job.targetDomain, new Date().toISOString(), report.status, report.message ?? null);
+    } catch (err) {
+      logger.debug({ err: String(err) }, "upsertReportOutcome failed (ignored)");
+    }
+  }
+
   insertClick(runId: number, result: ClickResult): number {
     const ev = result.evidence;
+    // Row already created by upsertReportOutcome → finalize it, preserving a
+    // proven report (submitted/filled) over a later error from a dying job.
+    const existing = this.db
+      .prepare("SELECT id, report_status FROM clicks WHERE run_id = ? AND job_id = ?")
+      .get(runId, result.job.id) as { id: number; report_status: string | null } | undefined;
+    if (existing) {
+      const keepStoredReport =
+        ["submitted", "filled"].includes(existing.report_status ?? "") &&
+        !["submitted", "filled"].includes(result.report?.status ?? "");
+      this.db
+        .prepare(
+          `UPDATE clicks SET status = ?, serp_url = ?, ad_title = ?, ad_description = ?, display_url = ?,
+             click_url = ?, landing_url = ?, final_url = ?, final_domain = ?, pre_click_ms = ?, stay_ms = ?,
+             internal_clicks = ?, screenshot_serp = ?, screenshot_landing = ?, screenshot_final = ?,
+             error = ?, captured_at = ?, report_status = ?, report_message = ?
+           WHERE id = ?`
+        )
+        .run(
+          result.status,
+          ev.serpUrl,
+          ev.adTitle,
+          ev.adDescription,
+          ev.displayUrl,
+          ev.clickUrl,
+          ev.landingUrl,
+          ev.finalUrl,
+          ev.finalDomain,
+          ev.preClickMs,
+          ev.stayMs,
+          ev.internalClicks,
+          ev.screenshotSerp,
+          ev.screenshotLanding,
+          ev.screenshotFinal,
+          result.error,
+          result.capturedAt,
+          keepStoredReport ? existing.report_status : (result.report?.status ?? null),
+          keepStoredReport
+            ? (result.report?.message ?? null)
+            : (result.report?.message ?? null),
+          existing.id
+        );
+      return existing.id;
+    }
     // clicks row + hops in ONE transaction — a hops failure must not leave an
     // orphaned clicks row behind.
     this.db.exec("BEGIN");

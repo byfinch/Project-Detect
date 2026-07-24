@@ -424,8 +424,11 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
               status: res.status,
               message: `inline report · ${domain} · ${res.status} · mail ${acc.fromPool ? "pool" : "static"}:${acc.email}`,
             };
+            // Write-through: inline flows die post-report too (8m cap, freeze).
+            store.upsertReportOutcome(runId, job, reportResult);
           } else {
             reportResult = { status: "no-form", message: "report UI not opened" };
+            store.upsertReportOutcome(runId, job, reportResult);
           }
           // The report flow leaves Google's "Reklam Merkezim" overlay OPEN when
           // the URL never left google.* (seen live: popup covering the SERP, the
