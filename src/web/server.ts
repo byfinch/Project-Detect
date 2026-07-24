@@ -1850,7 +1850,7 @@ export function createWebServer(port: number): void {
         const swept = sweepScreenshots();
         if (swept > 0) logger.info({ swept }, "idle reaper: old screenshots deleted");
         const { AdsPowerClient } = await import("../adspower/client.js");
-        const ads = new AdsPowerClient(config.adspower.baseUrl, config.adspower.apiKey, 250);
+        const ads = new AdsPowerClient(config.adspower.baseUrl, config.adspower.apiKey, 600);
         if (!(await ads.isUp().catch(() => false))) return;
         const profiles = await ads.listProfiles();
         const pool = profiles.filter((p) => /^(TR-ISP-|TR-MOBILE-)/.test(p.name || ""));
@@ -1880,6 +1880,37 @@ export function createWebServer(port: number): void {
         logger.warn({ err: String(err) }, "idle reaper tick failed");
       }
     }, INTERVAL_MS);
+
+    // Boot sweep (30s in): restart corpses — browsers left open by the PREVIOUS
+    // process — should not linger a full interval (seen live: two orphan
+    // profiles idle ~25 min after a deploy restart).
+    setTimeout(() => {
+      void (async () => {
+        try {
+          const { AdsPowerClient } = await import("../adspower/client.js");
+          const ads = new AdsPowerClient(config.adspower.baseUrl, config.adspower.apiKey, 600);
+          if (!(await ads.isUp().catch(() => false))) return;
+          const profiles = await ads.listProfiles();
+          const pool = profiles.filter((p) => /^(TR-ISP-|TR-MOBILE-)/.test(p.name || ""));
+          // Same ownership rule as the interval reaper: a scan may have started
+          // within these 30s — never touch browsers owned by THIS process.
+          const { getInUseProfiles } = await import("../browser/profileRegistry.js");
+          const inUse = getInUseProfiles();
+          const stopped: string[] = [];
+          for (const p of pool) {
+            if (inUse.has(p.user_id)) continue;
+            const a = await ads.browserActive(p.user_id).catch(() => null);
+            if (a?.status === "Active") {
+              await ads.stopBrowser(p.user_id).catch(() => {});
+              stopped.push(p.name || p.user_id);
+            }
+          }
+          if (stopped.length) logger.warn({ stopped }, "boot reaper: closed previous-process leftover browsers");
+        } catch (err) {
+          logger.warn({ err: String(err) }, "boot reaper failed");
+        }
+      })();
+    }, 30_000);
   }
 
   startIdleProfileReaper();
