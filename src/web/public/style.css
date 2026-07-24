@@ -1121,3 +1121,80 @@ tbody tr:hover td { background: rgba(0, 255, 157, 0.04); }
   .page-header h1 { font-size: 24px; }
   #view-log #log { height: 60vh; }
 }
+
+/* ── Operation detail modal ── */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 8, 0.82);
+  backdrop-filter: blur(3px);
+  z-index: 100;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 16px;
+  overflow-y: auto;
+}
+.modal.hidden { display: none; }
+.modal-card {
+  width: min(1080px, 96vw);
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 0 42px rgba(0, 255, 157, 0.14);
+  padding: 20px 22px 26px;
+}
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+  margin-bottom: 14px;
+}
+.modal-head h2 {
+  font-size: 16px;
+  color: var(--accent);
+  font-family: ui-monospace, monospace;
+  word-break: break-all;
+  margin: 0;
+}
+.modal-body { max-height: 74vh; overflow-y: auto; }
+
+.op-chips {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.op-chip {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.op-chip-k { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+.op-chip-v { font-size: 15px; font-weight: 600; color: var(--text); margin-top: 2px; }
+
+.op-sec {
+  font-size: 13px;
+  color: var(--accent);
+  margin: 18px 0 8px;
+  border-left: 3px solid var(--accent);
+  padding-left: 8px;
+}
+.op-detail-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.op-detail-table th, .op-detail-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.op-detail-table th { color: var(--text-dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+.op-detail-table td.ok { color: var(--accent); }
+.op-detail-table td.err { color: #ff5d5d; }
+.op-detail-table td.warn { color: #ffc857; }
+
+tr.op-row { cursor: pointer; transition: background 0.12s ease; }
+tr.op-row:hover { background: var(--accent-soft); }

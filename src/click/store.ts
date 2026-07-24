@@ -423,6 +423,240 @@ export class ClickStore {
     };
   }
 
+  /**
+   * One row per OPERATION (not operation × domain) — the panel's main table.
+   * Per-site detail lives in operationDetail().
+   */
+  operationSummaries(page = 1, limit = 5): {
+    total: number;
+    results: Array<{
+      operationId: string;
+      startedAt: string | null;
+      lastAt: string | null;
+      domainCount: number;
+      devices: string;
+      keywords: string;
+      attempts: number;
+      clicks: number;
+      reports: number;
+    }>;
+  } {
+    const OP = `COALESCE(r.operation_id, 'run-' || r.id)`;
+    const countRow = this.db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM (
+           SELECT 1 FROM click_runs r LEFT JOIN clicks c ON c.run_id = r.id
+           GROUP BY ${OP} HAVING COUNT(c.id) > 0
+         )`
+      )
+      .get() as { c: number };
+    const offset = Math.max(0, (page - 1) * limit);
+    const results = this.db
+      .prepare(
+        `SELECT
+           ${OP} AS operationId,
+           MIN(r.started_at) AS startedAt,
+           MAX(c.captured_at) AS lastAt,
+           COUNT(DISTINCT c.target_domain) AS domainCount,
+           (SELECT GROUP_CONCAT(DISTINCT r2.target_device) FROM click_runs r2
+             WHERE COALESCE(r2.operation_id, 'run-' || r2.id) = ${OP}) AS devices,
+           (SELECT GROUP_CONCAT(kw) FROM (
+              SELECT DISTINCT c2.keyword AS kw FROM clicks c2
+              JOIN click_runs r2 ON c2.run_id = r2.id
+              WHERE COALESCE(r2.operation_id, 'run-' || r2.id) = ${OP})) AS keywords,
+           COUNT(c.id) AS attempts,
+           SUM(CASE WHEN c.status = 'success' THEN 1 ELSE 0 END) AS clicks,
+           SUM(CASE WHEN c.report_status IN ('submitted', 'filled') THEN 1 ELSE 0 END) AS reports
+         FROM click_runs r
+         LEFT JOIN clicks c ON c.run_id = r.id
+         GROUP BY operationId
+         HAVING COUNT(c.id) > 0
+         ORDER BY MAX(r.id) DESC
+         LIMIT ? OFFSET ?`
+      )
+      .all(limit, offset) as Array<Record<string, unknown>>;
+    return {
+      total: Number(countRow.c),
+      results: results.map((r) => ({
+        operationId: String(r.operationId),
+        startedAt: (r.startedAt as string) ?? null,
+        lastAt: (r.lastAt as string) ?? null,
+        domainCount: Number(r.domainCount),
+        devices: (r.devices as string) ?? "",
+        keywords: (r.keywords as string) ?? "",
+        attempts: Number(r.attempts),
+        clicks: Number(r.clicks),
+        reports: Number(r.reports),
+      })),
+    };
+  }
+
+  /** Full drill-down for one operation: per-domain, per-device, per-profile, timeline. */
+  operationDetail(operationId: string): {
+    summary: {
+      operationId: string;
+      startedAt: string | null;
+      lastAt: string | null;
+      domainCount: number;
+      devices: string;
+      keywords: string;
+      attempts: number;
+      clicks: number;
+      reports: number;
+    } | null;
+    byDomain: Array<{
+      domain: string;
+      attempts: number;
+      clicks: number;
+      reports: number;
+      devices: string;
+      keywords: string;
+      profiles: number;
+    }>;
+    byDevice: Array<{ device: string; attempts: number; clicks: number; reports: number }>;
+    byStatus: Array<{ status: string; n: number }>;
+    byProfile: Array<{ profileId: string; attempts: number; clicks: number; reports: number }>;
+    timeline: Array<{
+      capturedAt: string;
+      profileId: string;
+      device: string;
+      keyword: string;
+      domain: string;
+      status: string;
+      reportStatus: string | null;
+      error: string | null;
+    }>;
+  } {
+    const OP = `COALESCE(r.operation_id, 'run-' || r.id)`;
+    const summary = this.db
+      .prepare(
+        `SELECT
+           ${OP} AS operationId,
+           MIN(r.started_at) AS startedAt,
+           MAX(c.captured_at) AS lastAt,
+           COUNT(DISTINCT c.target_domain) AS domainCount,
+           (SELECT GROUP_CONCAT(DISTINCT r2.target_device) FROM click_runs r2
+             WHERE COALESCE(r2.operation_id, 'run-' || r2.id) = ${OP}) AS devices,
+           (SELECT GROUP_CONCAT(kw) FROM (
+              SELECT DISTINCT c2.keyword AS kw FROM clicks c2
+              JOIN click_runs r2 ON c2.run_id = r2.id
+              WHERE COALESCE(r2.operation_id, 'run-' || r2.id) = ${OP})) AS keywords,
+           COUNT(c.id) AS attempts,
+           SUM(CASE WHEN c.status = 'success' THEN 1 ELSE 0 END) AS clicks,
+           SUM(CASE WHEN c.report_status IN ('submitted', 'filled') THEN 1 ELSE 0 END) AS reports
+         FROM click_runs r
+         LEFT JOIN clicks c ON c.run_id = r.id
+         WHERE ${OP} = ?
+         GROUP BY operationId`
+      )
+      .get(operationId) as Record<string, unknown> | undefined;
+
+    const byDomain = this.db
+      .prepare(
+        `SELECT
+           c.target_domain AS domain,
+           COUNT(*) AS attempts,
+           SUM(CASE WHEN c.status = 'success' THEN 1 ELSE 0 END) AS clicks,
+           SUM(CASE WHEN c.report_status IN ('submitted', 'filled') THEN 1 ELSE 0 END) AS reports,
+           GROUP_CONCAT(DISTINCT c.device) AS devices,
+           GROUP_CONCAT(DISTINCT c.keyword) AS keywords,
+           COUNT(DISTINCT c.profile_id) AS profiles
+         FROM clicks c JOIN click_runs r ON c.run_id = r.id
+         WHERE ${OP} = ?
+         GROUP BY c.target_domain
+         ORDER BY clicks DESC, reports DESC, attempts DESC`
+      )
+      .all(operationId) as Array<Record<string, unknown>>;
+
+    const byDevice = this.db
+      .prepare(
+        `SELECT c.device AS device, COUNT(*) AS attempts,
+           SUM(CASE WHEN c.status = 'success' THEN 1 ELSE 0 END) AS clicks,
+           SUM(CASE WHEN c.report_status IN ('submitted', 'filled') THEN 1 ELSE 0 END) AS reports
+         FROM clicks c JOIN click_runs r ON c.run_id = r.id
+         WHERE ${OP} = ? GROUP BY c.device ORDER BY attempts DESC`
+      )
+      .all(operationId) as Array<Record<string, unknown>>;
+
+    const byStatus = this.db
+      .prepare(
+        `SELECT c.status AS status, COUNT(*) AS n
+         FROM clicks c JOIN click_runs r ON c.run_id = r.id
+         WHERE ${OP} = ? GROUP BY c.status ORDER BY n DESC`
+      )
+      .all(operationId) as Array<Record<string, unknown>>;
+
+    const byProfile = this.db
+      .prepare(
+        `SELECT c.profile_id AS profileId, COUNT(*) AS attempts,
+           SUM(CASE WHEN c.status = 'success' THEN 1 ELSE 0 END) AS clicks,
+           SUM(CASE WHEN c.report_status IN ('submitted', 'filled') THEN 1 ELSE 0 END) AS reports
+         FROM clicks c JOIN click_runs r ON c.run_id = r.id
+         WHERE ${OP} = ? GROUP BY c.profile_id
+         ORDER BY clicks DESC, reports DESC, attempts DESC LIMIT 15`
+      )
+      .all(operationId) as Array<Record<string, unknown>>;
+
+    const timeline = this.db
+      .prepare(
+        `SELECT c.captured_at AS capturedAt, c.profile_id AS profileId, c.device AS device,
+           c.keyword AS keyword, c.target_domain AS domain, c.status AS status,
+           c.report_status AS reportStatus, c.error AS error
+         FROM clicks c JOIN click_runs r ON c.run_id = r.id
+         WHERE ${OP} = ? ORDER BY c.id DESC LIMIT 100`
+      )
+      .all(operationId) as Array<Record<string, unknown>>;
+
+    const num = (v: unknown) => Number(v ?? 0);
+    return {
+      summary: summary
+        ? {
+            operationId: String(summary.operationId),
+            startedAt: (summary.startedAt as string) ?? null,
+            lastAt: (summary.lastAt as string) ?? null,
+            domainCount: num(summary.domainCount),
+            devices: (summary.devices as string) ?? "",
+            keywords: (summary.keywords as string) ?? "",
+            attempts: num(summary.attempts),
+            clicks: num(summary.clicks),
+            reports: num(summary.reports),
+          }
+        : null,
+      byDomain: byDomain.map((r) => ({
+        domain: String(r.domain ?? ""),
+        attempts: num(r.attempts),
+        clicks: num(r.clicks),
+        reports: num(r.reports),
+        devices: (r.devices as string) ?? "",
+        keywords: (r.keywords as string) ?? "",
+        profiles: num(r.profiles),
+      })),
+      byDevice: byDevice.map((r) => ({
+        device: String(r.device ?? ""),
+        attempts: num(r.attempts),
+        clicks: num(r.clicks),
+        reports: num(r.reports),
+      })),
+      byStatus: byStatus.map((r) => ({ status: String(r.status ?? ""), n: num(r.n) })),
+      byProfile: byProfile.map((r) => ({
+        profileId: String(r.profileId ?? ""),
+        attempts: num(r.attempts),
+        clicks: num(r.clicks),
+        reports: num(r.reports),
+      })),
+      timeline: timeline.map((r) => ({
+        capturedAt: String(r.capturedAt ?? ""),
+        profileId: String(r.profileId ?? ""),
+        device: String(r.device ?? ""),
+        keyword: String(r.keyword ?? ""),
+        domain: String(r.domain ?? ""),
+        status: String(r.status ?? ""),
+        reportStatus: (r.reportStatus as string) ?? null,
+        error: (r.error as string) ?? null,
+      })),
+    };
+  }
+
   close(): void {
     this.db.close();
   }

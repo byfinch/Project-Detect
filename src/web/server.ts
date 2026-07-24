@@ -933,6 +933,34 @@ export function createWebServer(port: number): void {
     }
   });
 
+  /** One row per operation (main "Operasyon Sonuçları" table). */
+  app.get("/api/ops/summary", (req: Request, res: Response) => {
+    const page = Math.max(1, parseInt(String(req.query.page || "1"), 10) || 1);
+    const limit = Math.max(1, Math.min(50, parseInt(String(req.query.limit || "5"), 10) || 5));
+    const store = new ClickStore(config.output.dir);
+    try {
+      const { total, results } = store.operationSummaries(page, limit);
+      res.json({ total, page, limit, results });
+    } finally {
+      store.close();
+    }
+  });
+
+  /** Drill-down for one operation (detail modal). */
+  app.get("/api/ops/detail", (req: Request, res: Response) => {
+    const operationId = String(req.query.operationId || "").trim();
+    if (!operationId) {
+      res.status(400).json({ error: "operationId gerekli" });
+      return;
+    }
+    const store = new ClickStore(config.output.dir);
+    try {
+      res.json(store.operationDetail(operationId));
+    } finally {
+      store.close();
+    }
+  });
+
   /**
    * Customer-facing proof panel: every submitted ad report as a distinguishable
    * row — timestamp, keyword, target domain, device, the pool email used, the

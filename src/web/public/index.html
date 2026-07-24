@@ -196,7 +196,7 @@
           <div class="panel-icon op-results-icon">📊</div>
           <div>
             <h2>Operasyon Sonuçları</h2>
-            <p class="panel-desc">Operasyon × reklam bazında tıklama ve şikayet — bir operasyonun tüm dalgaları tek satırda birikir; yeni operasyon sıfırdan başlar.</p>
+            <p class="panel-desc">Her satır bir operasyon — tüm dalgaları ve domainleri toplu. Detay için satıra tıkla.</p>
           </div>
         </div>
         <div class="panel-body">
@@ -206,11 +206,12 @@
                 <tr>
                   <th>Operasyon</th>
                   <th>Keyword</th>
-                  <th>Domain</th>
                   <th>Cihaz</th>
+                  <th>Domain</th>
                   <th>Deneme</th>
                   <th>Tıklama</th>
                   <th>Şikayet</th>
+                  <th>Başarı</th>
                   <th>Başlangıç</th>
                 </tr>
               </thead>
@@ -221,6 +222,17 @@
           <div id="op-results-pager" class="pager"></div>
         </div>
       </section>
+
+      <!-- Operation detail modal -->
+      <div id="op-detail-modal" class="modal hidden">
+        <div class="modal-card">
+          <div class="modal-head">
+            <h2 id="op-detail-title">Operasyon</h2>
+            <button id="op-detail-close" class="pager-btn">Kapat ✕</button>
+          </div>
+          <div id="op-detail-body" class="modal-body"></div>
+        </div>
+      </div>
     </div>
 
     <!-- ═══ KANIT ═══ -->

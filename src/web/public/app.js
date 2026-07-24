@@ -272,7 +272,7 @@ async function refresh(force = false) {
     const [ops, complaintRes, opResultsRes, scansRes, proofRes, healthRes] = await Promise.all([
       API.get("/api/ops"),
       API.get("/api/reports/complaints/packs").catch(() => ({ packs: [] })),
-      API.get(`/api/ops/results?page=${opResultsPage}&limit=${OP_RESULTS_LIMIT}`).catch(() => ({ results: [], total: 0, page: 1, limit: OP_RESULTS_LIMIT })),
+      API.get(`/api/ops/summary?page=${opResultsPage}&limit=${OP_RESULTS_LIMIT}`).catch(() => ({ results: [], total: 0, page: 1, limit: OP_RESULTS_LIMIT })),
       API.get(`/api/scans/paged?page=${scansPage}&limit=${SCANS_PER_PAGE}`).catch(() => ({ scans: [], total: 0, page: 1, limit: SCANS_PER_PAGE })),
       API.get(`/api/reports/submitted?page=${proofPage}&limit=${PROOF_LIMIT}${proofQs}`).catch(() => ({ results: [], total: 0, page: 1, limit: PROOF_LIMIT })),
       API.get("/api/profiles/health").catch(() => ({ profiles: [] })),
@@ -454,29 +454,129 @@ function renderOpResults(data) {
     return;
   }
   empty.style.display = "none";
-  // Each row = one operation × domain. Waves inside an operation accumulate;
-  // a new operation on the same ad starts its own row from zero.
+  // Each row = ONE operation (all its waves/domains aggregated). Click → detail modal.
   const opLabel = (id) => {
     const s = String(id || "");
     if (s.startsWith("run-")) return "#" + s.slice(4);
     return s.length > 18 ? s.slice(0, 8) + "…" + s.slice(-5) : s;
   };
+  const pct = (r) => (r.attempts > 0 ? Math.round((r.clicks / r.attempts) * 100) : 0);
   tbody.innerHTML = results
     .map(
-      (r) => `<tr>
-        <td class="mono" title="${esc(r.operationId)}">${esc(opLabel(r.operationId))}</td>
-        <td>${esc(r.keywords || "—")}</td>
-        <td>${esc(r.domain)}</td>
+      (r) => `<tr class="op-row" data-op="${esc(r.operationId)}" title="Detay için tıkla">
+        <td class="mono">${esc(opLabel(r.operationId))}</td>
+        <td title="${esc(r.keywords || "")}">${esc((r.keywords || "—").length > 32 ? (r.keywords || "").slice(0, 32) + "…" : r.keywords || "—")}</td>
         <td>${esc(r.devices || "—")}</td>
+        <td>${r.domainCount}</td>
         <td>${r.attempts}</td>
         <td>${r.clicks}</td>
         <td>${r.reports}</td>
+        <td class="muted">%${pct(r)}</td>
         <td class="muted">${r.startedAt ? new Date(r.startedAt).toLocaleString("tr-TR") : "—"}</td>
       </tr>`
     )
     .join("");
+  tbody.querySelectorAll(".op-row").forEach((row) => {
+    row.addEventListener("click", () => openOpDetail(row.dataset.op));
+  });
   renderOpResultsPager(data.total || results.length, data.page || 1, data.limit || OP_RESULTS_LIMIT);
 }
+
+/* ── Operation detail modal ── */
+let opDetailLoading = false;
+async function openOpDetail(operationId) {
+  if (opDetailLoading) return;
+  opDetailLoading = true;
+  const modal = document.getElementById("op-detail-modal");
+  const body = document.getElementById("op-detail-body");
+  const title = document.getElementById("op-detail-title");
+  if (!modal || !body || !title) { opDetailLoading = false; return; }
+  title.textContent = `Operasyon: ${operationId}`;
+  body.innerHTML = `<div class="empty">Yükleniyor…</div>`;
+  modal.classList.remove("hidden");
+  try {
+    const d = await API.get(`/api/ops/detail?operationId=${encodeURIComponent(operationId)}`);
+    const s = d.summary;
+    if (!s) {
+      body.innerHTML = `<div class="empty">Operasyon bulunamadı</div>`;
+      return;
+    }
+    const pct = s.attempts > 0 ? Math.round((s.clicks / s.attempts) * 100) : 0;
+    const dur = s.startedAt && s.lastAt
+      ? Math.max(1, Math.round((new Date(s.lastAt) - new Date(s.startedAt)) / 60000)) + " dk"
+      : "—";
+    const chips = [
+      ["Başlangıç", s.startedAt ? new Date(s.startedAt).toLocaleString("tr-TR") : "—"],
+      ["Son aktivite", s.lastAt ? new Date(s.lastAt).toLocaleString("tr-TR") : "—"],
+      ["Süre", dur],
+      ["Cihaz", s.devices || "—"],
+      ["Domain", s.domainCount],
+      ["Deneme", s.attempts],
+      ["Tıklama", s.clicks],
+      ["Şikayet", s.reports],
+      ["Başarı", "%" + pct],
+    ].map(([k, v]) => `<div class="op-chip"><div class="op-chip-k">${k}</div><div class="op-chip-v">${v}</div></div>`).join("");
+
+    const statusTxt = (d.byStatus || []).map((x) => `${x.status}: ${x.n}`).join(" · ");
+    const domainRows = (d.byDomain || []).map((x) => {
+      const p = x.attempts > 0 ? Math.round((x.clicks / x.attempts) * 100) : 0;
+      return `<tr>
+        <td class="mono">${esc(x.domain)}</td>
+        <td title="${esc(x.keywords || "")}">${esc((x.keywords || "—").length > 24 ? (x.keywords || "").slice(0, 24) + "…" : x.keywords || "—")}</td>
+        <td>${esc(x.devices || "—")}</td>
+        <td>${x.profiles}</td>
+        <td>${x.attempts}</td><td>${x.clicks}</td><td>${x.reports}</td>
+        <td class="muted">%${p}</td>
+      </tr>`;
+    }).join("");
+    const profileRows = (d.byProfile || []).map((x) =>
+      `<tr><td class="mono" title="${esc(x.profileId)}">${esc(x.profileId.length > 12 ? "…" + x.profileId.slice(-8) : x.profileId)}</td><td>${x.attempts}</td><td>${x.clicks}</td><td>${x.reports}</td></tr>`
+    ).join("");
+    const timelineRows = (d.timeline || []).slice(0, 50).map((x) => {
+      const cls = x.status === "success" ? "ok" : x.status === "failed" || x.status === "profile_error" ? "err" : x.status === "captcha" ? "warn" : "";
+      return `<tr>
+        <td class="muted">${x.capturedAt ? new Date(x.capturedAt).toLocaleTimeString("tr-TR") : "—"}</td>
+        <td class="mono" title="${esc(x.profileId)}">${esc(x.profileId.length > 10 ? "…" + x.profileId.slice(-6) : x.profileId)}</td>
+        <td>${esc(x.device)}</td>
+        <td title="${esc(x.keyword)}">${esc(x.keyword.length > 18 ? x.keyword.slice(0, 18) + "…" : x.keyword)}</td>
+        <td class="mono" title="${esc(x.domain)}">${esc(x.domain.length > 26 ? x.domain.slice(0, 26) + "…" : x.domain)}</td>
+        <td class="${cls}">${esc(x.status)}</td>
+        <td>${esc(x.reportStatus || "—")}</td>
+      </tr>`;
+    }).join("");
+
+    body.innerHTML = `
+      <div class="op-chips">${chips}</div>
+      <div class="muted" style="margin:6px 0 14px">Durum dağılımı: ${esc(statusTxt || "—")}</div>
+      <h3 class="op-sec">Site Bazında</h3>
+      <div class="table-wrap"><table class="op-detail-table"><thead><tr>
+        <th>Domain</th><th>Keyword</th><th>Cihaz</th><th>Profil</th><th>Deneme</th><th>Tık</th><th>Rapor</th><th>Başarı</th>
+      </tr></thead><tbody>${domainRows || `<tr><td colspan="8" class="empty">Veri yok</td></tr>`}</tbody></table></div>
+      <h3 class="op-sec">Profil Bazında (ilk 15)</h3>
+      <div class="table-wrap"><table class="op-detail-table"><thead><tr>
+        <th>Profil</th><th>Deneme</th><th>Tık</th><th>Rapor</th>
+      </tr></thead><tbody>${profileRows || `<tr><td colspan="4" class="empty">Veri yok</td></tr>`}</tbody></table></div>
+      <h3 class="op-sec">İş Akışı (son 50)</h3>
+      <div class="table-wrap"><table class="op-detail-table"><thead><tr>
+        <th>Saat</th><th>Profil</th><th>Cihaz</th><th>Keyword</th><th>Domain</th><th>Tık</th><th>Rapor</th>
+      </tr></thead><tbody>${timelineRows || `<tr><td colspan="7" class="empty">Veri yok</td></tr>`}</tbody></table></div>`;
+  } catch (err) {
+    body.innerHTML = `<div class="empty">Detay yüklenemedi: ${esc(String(err))}</div>`;
+  } finally {
+    opDetailLoading = false;
+  }
+}
+
+function closeOpDetail() {
+  document.getElementById("op-detail-modal")?.classList.add("hidden");
+}
+document.getElementById("op-detail-close")?.addEventListener("click", closeOpDetail);
+document.getElementById("op-detail-modal")?.addEventListener("click", (e) => {
+  if (e.target === e.currentTarget) closeOpDetail();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeOpDetail();
+});
 
 /* ── Profile health grid ── */
 function renderHealth(data) {
