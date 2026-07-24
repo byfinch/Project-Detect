@@ -12,7 +12,7 @@ import type { Device } from "../types.js";
 import type { ClickBehaviorConfig, ClickEvidence, ClickJob, ClickReportResult, ClickResult, ClickStatus } from "./types.js";
 import { behaveOnLanding, naturalWait } from "./behavior.js";
 import { behaviorForProfile, personaFor } from "../util/persona.js";
-import { appAdKey, isAppInstallAd } from "../util/appAds.js";
+import { appAdKey, appAdPackage, isAppInstallAd } from "../util/appAds.js";
 import { openReportUi, fillReportForm, type ReportTask } from "../report/autoSerpReport.js";
 import { buildEvidencePaths, ensureEvidenceDir, screenshotPage } from "./evidence.js";
 import type { ClickStore } from "./store.js";
@@ -641,6 +641,25 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
         }
         await landingPage.waitForLoadState("domcontentloaded", { timeout: 20000 }).catch(() => {});
         ev.landingUrl = landingPage.url();
+
+        // Play app ads: the aclk/intent chain ends at intent://play.google.com —
+        // a browser cannot open the intent protocol (and mobile emulation freezes
+        // on the "open in app" flow). The CLICK is already registered by Google
+        // (aclk fired); for landing evidence + stay, take the HTTPS Play page
+        // (what an app-less user sees) via the package id.
+        if (
+          ev.landingUrl.startsWith("intent:") ||
+          (currentAd.adHref?.startsWith("intent://") && ev.landingUrl.includes("google."))
+        ) {
+          const pkg =
+            appAdPackage(currentAd.adHref) ?? appAdPackage(ev.landingUrl);
+          if (pkg) {
+            const playUrl = `https://play.google.com/store/apps/details?id=${pkg}&hl=tr&gl=tr`;
+            logger.info({ jobId: jobForRecord.id, pkg }, "app ad: intent landing — navigating to HTTPS Play page for evidence");
+            await landingPage.goto(playUrl, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
+            ev.landingUrl = landingPage.url();
+          }
+        }
 
         // Cloudflare doğrulama kutusu (Turnstile checkbox) — tıkla / 2captcha.
         let cfPassed = true;

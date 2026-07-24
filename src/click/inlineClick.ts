@@ -465,6 +465,22 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
         await landing.waitForLoadState("domcontentloaded", { timeout: 20000 }).catch(() => {});
         evidence.landingUrl = landing.url();
 
+        // Play app ads: intent:// landing can't open in a browser (click IS
+        // registered via aclk) — take the HTTPS Play page for evidence/stay.
+        if (
+          evidence.landingUrl.startsWith("intent:") ||
+          (ad.adHref?.startsWith("intent://") && evidence.landingUrl.includes("google."))
+        ) {
+          const { appAdPackage } = await import("../util/appAds.js");
+          const pkg = appAdPackage(ad.adHref) ?? appAdPackage(evidence.landingUrl);
+          if (pkg) {
+            const playUrl = `https://play.google.com/store/apps/details?id=${pkg}&hl=tr&gl=tr`;
+            logger.info({ domain, pkg }, "inline app ad: intent landing — HTTPS Play page for evidence");
+            await landing.goto(playUrl, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
+            evidence.landingUrl = landing.url();
+          }
+        }
+
         let cfPassed = true;
         try {
           const { passCloudflareIfPresent } = await import("../captcha/cloudflare.js");
