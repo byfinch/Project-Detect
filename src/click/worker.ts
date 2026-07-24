@@ -38,6 +38,8 @@ export interface WorkerContext {
     failed: number;
     captcha: number;
     skipped: number;
+    /** Live jobs across BOTH legs — the governor's global ceiling needs it. */
+    running: number;
   };
 }
 
@@ -562,7 +564,10 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
         // opener): find the target ad card, click its primary link. The old
         // title-text / aclk-href heuristics miss desktop cards entirely
         // ("could not locate anchor element" → report without click).
-        const cardAnchor = await page.evaluate(
+        // 15s race: the renderer probe passes, THEN an intent redirect can
+        // still freeze mid-flight — an unbounded evaluate hangs the slot.
+        const cardAnchor = await Promise.race([
+          page.evaluate(
           ({ target, titleHint }) => {
             const norm = (s: string) => s.toLowerCase().replace(/^(www\.|m\.)/, "").trim();
             const cards = Array.from(
@@ -596,7 +601,9 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
             return null;
           },
           { target: currentAd.displayDomain.toLowerCase().replace(/^(www\.|m\.)/, ""), titleHint: currentAd.title?.slice(0, 60) ?? "" }
-        ).catch(() => null);
+          ).catch(() => null),
+          sleep(15_000).then(() => null),
+        ]);
 
         let landingPage: Page = page;
         if (cardAnchor) {
@@ -712,10 +719,15 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
           throw new Error("cloudflare challenge not passed");
         }
 
-        // Post-click behaviour on landing.
-        const behaviour = await behaveOnLanding(landingPage, job.device, personaBehavior, profileKey);
-        ev.stayMs = behaviour.stayMs;
-        ev.internalClicks = behaviour.internalClicks;
+        // Post-click behaviour on landing. 90s race (same class as the inline
+        // fix): evaluates hang forever on a frozen renderer — the slot dies
+        // with the 8m cap instead of waiting forever.
+        const behaviour = await Promise.race([
+          behaveOnLanding(landingPage, job.device, personaBehavior, profileKey),
+          sleep(90_000).then(() => null),
+        ]);
+        ev.stayMs = behaviour?.stayMs ?? 0;
+        ev.internalClicks = behaviour?.internalClicks ?? 0;
         ev.screenshotLanding = await screenshotPage(landingPage, evPaths.paths.landing);
 
         // Resolve fallback: only if the pre-click resolve failed.
@@ -802,7 +814,7 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
               finalUrl: ev.finalUrl,
               finalDomain: ev.finalDomain,
             });
-            if (retryRep.status === "submitted" || retryRep.status === "filled" || rep.status === "skipped") {
+            if (retryRep.status === "submitted" || retryRep.status === "filled") {
               rep = retryRep;
               ctx.store.upsertReportOutcome(ctx.runId, jobForRecord, rep);
             }
@@ -919,6 +931,22 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
       const r = await clickAndReportAd(extra, extraJob);
       ctx.store.insertClick(ctx.runId, { job: extraJob, status: r.status, evidence: r.evidence, error: r.error, capturedAt: new Date().toISOString(), report: r.reportResult });
       logger.info({ jobId: job.id, extra: extra.displayDomain, status: r.status, report: r.reportResult.status }, "harvest: extra ad click+report done");
+      // Same panel event as the target-missing harvest loop — these clicks
+      // bypass executeJob, so without it the terminal never shows them.
+      ctx.onProgress?.({
+        type: "click-done",
+        jobId: extraJob.id,
+        runId: ctx.runId,
+        domain: extra.displayDomain,
+        device: job.device,
+        profileId: job.profileId,
+        status: r.status,
+        reportStatus: r.reportResult?.status ?? null,
+        reportMessage: r.reportResult?.message ?? null,
+        stayMs: r.evidence?.stayMs ?? 0,
+        harvest: true,
+        message: `hasat tık ${r.status} · rapor ${r.reportResult?.status ?? "-"} · ${extra.displayDomain} · ${job.device}`,
+      });
     }
 
   } catch (err) {

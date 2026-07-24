@@ -345,7 +345,7 @@ async function runDeviceClickEngine(
   /** Locked total for this whole run — never grow with requeues / never shrink mid-run. */
   const lockedTotal = Math.max(1, ctx.fixedTotalJobs ?? deviceQueued);
 
-  onProgress?.({
+  safeProgress({
     type: "click-queue-ready",
     runId: ctx.runId,
     device,
@@ -366,22 +366,25 @@ async function runDeviceClickEngine(
   let lastHeartbeatKey = "";
 
   /**
-   * RAM governor: effective parallelism follows MemAvailable instead of a
-   * hard-coded cap. Both device legs read the SAME host RAM, so as one leg
-   * spawns browsers the other's governor sheds automatically — no global
-   * coordinator needed. Bigger VPS → same code runs wider.
+   * RAM governor: effective parallelism follows MemAvailable — but NEVER above
+   * the global cap minus what the OTHER device leg is already running (audit:
+   * per-leg ceiling 16 could open 32 browsers; both legs also stampeded on the
+   * same MemAvailable reading within one tick). Floor 4 regardless.
    */
   let lastGovConc = concurrency;
   function effectiveConcurrency(): number {
     const d = governedConcurrency({ base: concurrency, floor: 4, ceiling: 16 });
-    if (d.concurrency !== lastGovConc) {
+    const otherLegs = Math.max(0, (ctx.sharedStats?.running ?? 0) - runningProfiles.size);
+    const capByGlobal = Math.max(4, engineConfig.concurrency - otherLegs);
+    const effective = Math.min(d.concurrency, capByGlobal);
+    if (effective !== lastGovConc) {
       logger.info(
-        { device, from: lastGovConc, to: d.concurrency, availMb: d.availMb, reason: d.reason },
+        { device, from: lastGovConc, to: effective, availMb: d.availMb, otherLegs, reason: d.reason },
         "click governor: concurrency adjusted"
       );
-      lastGovConc = d.concurrency;
+      lastGovConc = effective;
     }
-    return d.concurrency;
+    return effective;
   }
 
   /**
@@ -440,6 +443,19 @@ async function runDeviceClickEngine(
     ctx.sharedStats[kind] += 1;
   }
 
+  /**
+   * onProgress must NEVER throw into job accounting (audit: a panel callback
+   * throw landed in executeJob's catch → job counted failed AFTER success,
+   * double-counted, phantom store row). Swallow callback errors here.
+   */
+  function safeProgress(ev: Record<string, unknown>): void {
+    try {
+      onProgress?.(ev);
+    } catch (err) {
+      logger.debug({ err: String(err) }, "onProgress callback threw (ignored)");
+    }
+  }
+
   function emitHeartbeat(force = false): void {
     const now = Date.now();
     const g = globalDone();
@@ -452,7 +468,7 @@ async function runDeviceClickEngine(
     lastHeartbeatKey = key;
     const remaining = Math.max(0, lockedTotal - g.done);
     const queueLeft = pending.length + runningProfiles.size; // kalan iş: kuyruk + aktif
-    onProgress?.({
+    safeProgress({
       type: "click-progress",
       runId: ctx.runId,
       device,
@@ -470,13 +486,14 @@ async function runDeviceClickEngine(
 
   async function executeJob(job: ClickJob): Promise<void> {
     runningProfiles.add(job.profileId);
+    if (ctx.sharedStats) ctx.sharedStats.running += 1;
     // Reset stale force-close flag: the same profile may run a later job after
     // a tail watchdog kill — without this its result would be silently dropped.
     forceClosed.delete(job.profileId);
     runningSince.set(job.profileId, Date.now());
     {
       const g = globalDone();
-      onProgress?.({
+      safeProgress({
         type: "click-progress",
         runId: ctx.runId,
         device,
@@ -504,13 +521,10 @@ async function runDeviceClickEngine(
       const timeoutP = new Promise<ClickResult>((res) => {
         timer = setTimeout(async () => {
           logger.error({ jobId: job.id, profileId: job.profileId, domain: job.targetDomain }, "click job hard timeout (8m) — force-closing stuck browser");
-          // Kill the wedged browser via the AdsPower HTTP API (same escape hatch
-          // as the cancel-drain path below). This rejects the hung CDP promises
-          // inside runClickJob, so the job dies instead of leaking an open,
-          // idle browser window forever.
-          await ctx.adsClient.stopBrowser(job.profileId).catch(() => {});
-          releaseProfile(job.profileId);
-          res({
+          // Resolve FIRST (scheduler must not wait on a wedged AdsPower API —
+          // that would stretch "8m" to ~9m exactly when the API is the problem),
+          // then fire-and-forget the browser kill (rejects hung CDP promises).
+          const result: ClickResult = {
             job,
             status: "failed",
             error: "hard timeout 8m — job reaped (stuck pre/post browser)",
@@ -522,7 +536,10 @@ async function runDeviceClickEngine(
               screenshotFinal: null, preClickMs: 0, stayMs: 0, internalClicks: 0,
             },
             report: { status: "error", message: "hard timeout" },
-          });
+          };
+          res(result);
+          void ctx.adsClient.stopBrowser(job.profileId).catch(() => {});
+          releaseProfile(job.profileId);
         }, JOB_HARD_TIMEOUT_MS);
       });
       let result: ClickResult;
@@ -560,7 +577,7 @@ async function runDeviceClickEngine(
         if (!adFreeWarned && consecutiveNotFoundSkips >= 3) {
           adFreeWarned = true;
           logger.warn({ device, pending: pending.length }, "device looks ad-free — jobs continue with real checks");
-          onProgress?.({
+          safeProgress({
             type: "click-progress",
             runId: ctx.runId,
             device,
@@ -635,7 +652,7 @@ async function runDeviceClickEngine(
         "click job finished"
       );
       const reportPart = result.report ? ` · rapor ${result.report.status}` : "";
-      onProgress?.({
+      safeProgress({
         type: "click-done",
         jobId: job.id,
         runId: ctx.runId,
@@ -682,7 +699,7 @@ async function runDeviceClickEngine(
         /* non-fatal */
       }
       const g = globalDone();
-      onProgress?.({
+      safeProgress({
         type: "click-done",
         jobId: job.id,
         runId: ctx.runId,
@@ -701,6 +718,7 @@ async function runDeviceClickEngine(
       });
     } finally {
       runningProfiles.delete(job.profileId);
+      if (ctx.sharedStats) ctx.sharedStats.running = Math.max(0, ctx.sharedStats.running - 1);
       runningSince.delete(job.profileId);
       emitHeartbeat();
     }
@@ -740,7 +758,7 @@ async function runDeviceClickEngine(
         const dropped = pending.length;
         pending.length = 0; // no new jobs — in-flight browsers finish their current job
         logger.warn({ device, dropped, running: runningProfiles.size }, "click engine cancelled — draining in-flight jobs");
-        onProgress?.({
+        safeProgress({
           type: "click-progress",
           runId: ctx.runId,
           device,
@@ -759,14 +777,17 @@ async function runDeviceClickEngine(
         logger.warn({ device, stuck }, "drain timeout — force-closing in-flight browsers");
         for (const pid of stuck) {
           // Mark force-closed so the job's own late rejection is not double-counted.
+          // Fire-and-forget the kill: N wedged profiles must not serialise into
+          // N×60s of API waits — the user asked to stop NOW (audit).
           forceClosed.add(pid);
-          await ctx.adsClient.stopBrowser(pid).catch(() => {});
+          void ctx.adsClient.stopBrowser(pid).catch(() => {});
           releaseProfile(pid);
           runningProfiles.delete(pid);
+          if (ctx.sharedStats) ctx.sharedStats.running = Math.max(0, ctx.sharedStats.running - 1);
           failed++;
           bumpShared("failed");
         }
-        onProgress?.({
+        safeProgress({
           type: "click-progress",
           runId: ctx.runId,
           device,
@@ -798,13 +819,16 @@ async function runDeviceClickEngine(
         if (Date.now() - since > TAIL_JOB_MAX_MS) {
           forceClosed.add(pid);
           logger.warn({ device, profileId: pid, ageMs: Date.now() - since }, "tail straggler force-closed (queue empty, job > 4m)");
-          await ctx.adsClient.stopBrowser(pid).catch(() => {});
+          // Fire-and-forget: an awaited API call here freezes the WHOLE
+          // scheduler loop for up to 60s (audit) — healthy jobs stall behind it.
+          void ctx.adsClient.stopBrowser(pid).catch(() => {});
           releaseProfile(pid);
           runningProfiles.delete(pid);
+          if (ctx.sharedStats) ctx.sharedStats.running = Math.max(0, ctx.sharedStats.running - 1);
           runningSince.delete(pid);
           failed++;
           bumpShared("failed");
-          onProgress?.({
+          safeProgress({
             type: "click-progress",
             runId: ctx.runId,
             device,
@@ -1028,7 +1052,7 @@ export async function runClickEngine(
   });
 
   const profileMeta = new Map(allProfiles.map((p) => [p.user_id, p]));
-  const sharedStats = { completed: 0, failed: 0, captcha: 0, skipped: 0 };
+  const sharedStats = { completed: 0, failed: 0, captcha: 0, skipped: 0, running: 0 };
   const ctx: WorkerContext = {
     runId,
     config,

@@ -962,6 +962,16 @@ async function runDeviceScan(
       }
       const pname = pool.nameById.get(profileId) || profileId;
       const persona = personaFor(pname);
+      /**
+       * Inner-activity feed for the wedge guard: a healthy inline click can
+       * legitimately run 20+ min (3-5 ads × report+click). The guard must hear
+       * heartbeat from INSIDE the step, not just the keyword boundary —
+       * otherwise it kills live work (audit: wedge guard vs healthy inline).
+       */
+      const wp = (ev: Record<string, unknown>) => {
+        bump();
+        onProgress?.(ev);
+      };
       logger.info({ device, profile: pname, persona: persona.label, keywords: profileKeywords.length }, "protected profile scan start");
       onProgress?.({
         type: "scan-progress",
@@ -1055,7 +1065,7 @@ async function runDeviceScan(
 
         try {
           const res = await withScanStepCap(
-            scanOneKeyword(ctx, state.session!, device, profileId, keyword, proxy, onProgress),
+            scanOneKeyword(ctx, state.session!, device, profileId, keyword, proxy, wp),
             `keyword scan "${keyword}" (${pname})`
           );
           if (res.captcha) {
@@ -1139,7 +1149,7 @@ async function runDeviceScan(
                   withReport: true,
                   operationId: `scan-${ctx.scanId}`,
                   captchaProxy: state.profileId ? pool.proxies.get(state.profileId) : undefined,
-                  onProgress,
+                  onProgress: wp,
                 });
               } catch (err) {
                 if (err instanceof InlineClickTimeoutError) {
@@ -1240,6 +1250,12 @@ async function runDeviceScan(
         const bump = () => {
           lastActivity = Date.now();
         };
+        /** Inner-activity feed (see protect-pool twin): healthy inline clicks
+         * run 20+ min — the guard must hear heartbeat from inside the step. */
+        const wp = (ev: Record<string, unknown>) => {
+          bump();
+          onProgress?.(ev);
+        };
         const wedgeGuard = setInterval(() => {
           const silentMs = Date.now() - lastActivity;
           if (state.profileId && silentMs > 7 * 60_000) {
@@ -1328,7 +1344,7 @@ async function runDeviceScan(
             try {
               const proxy = state.profileId ? pool.proxies.get(state.profileId) : undefined;
               const res = await withScanStepCap(
-                scanOneKeyword(ctx, state.session!, device, state.profileId!, keyword, proxy, onProgress),
+                scanOneKeyword(ctx, state.session!, device, state.profileId!, keyword, proxy, wp),
                 `keyword scan "${keyword}" (worker ${w})`
               );
               state.queriesOnProfile++;
@@ -1405,7 +1421,7 @@ async function runDeviceScan(
                       withReport: true,
                       operationId: `scan-${ctx.scanId}`,
                       captchaProxy: pool.proxies.get(state.profileId),
-                      onProgress,
+                      onProgress: wp,
                     });
                   } catch (err) {
                     if (err instanceof InlineClickTimeoutError) {

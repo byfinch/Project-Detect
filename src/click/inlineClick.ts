@@ -314,11 +314,12 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
         sleep(5_000).then(() => false),
       ]);
       if (!rendererAlive) {
+        // Renderer died BEFORE anything for this ad — no report, no click.
+        // Record honestly (earlier ads in this loop already wrote their own rows).
         status = "skipped";
-        error = "renderer frozen before click phase (intent redirect?) — profile bailed early";
+        error = "renderer frozen before report/click (intent redirect?) — nothing attempted for this ad";
         skipped++;
-        if (reportResult.status === "submitted" || reportResult.status === "filled") reported++;
-        logger.warn({ domain, profileId }, "inline: renderer dead before click — bailing profile early");
+        logger.warn({ domain, profileId }, "inline: renderer dead before report/click — bailing profile early");
         if (!opts.abortSignal?.aborted) {
           store.insertClick(runId, { job, status, evidence, error, capturedAt, report: reportResult });
           onProgress?.({
