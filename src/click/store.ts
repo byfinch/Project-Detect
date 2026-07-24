@@ -16,6 +16,18 @@ export interface ClickRunMeta {
   operationId?: string;
 }
 
+function normDevices(s: string): string {
+  const set = new Set(
+    String(s || "")
+      .split(",")
+      .map((x) => x.trim().toLowerCase())
+      .filter(Boolean)
+  );
+  // "both" already covers both; desktop+mobile together means the same thing.
+  if (set.has("both") || (set.has("desktop") && set.has("mobile"))) return "both";
+  return [...set].sort().join(",");
+}
+
 export class ClickStore {
   readonly db: DatabaseSync;
 
@@ -417,7 +429,7 @@ export class ClickStore {
       total: Number(countRow.c),
       results: results.map((r) => ({
         ...r,
-        devices: r.devices ?? "",
+        devices: normDevices(r.devices ?? ""),
         keywords: r.keywords ?? "",
       })),
     };
@@ -482,7 +494,7 @@ export class ClickStore {
         startedAt: (r.startedAt as string) ?? null,
         lastAt: (r.lastAt as string) ?? null,
         domainCount: Number(r.domainCount),
-        devices: (r.devices as string) ?? "",
+        devices: normDevices((r.devices as string) ?? ""),
         keywords: (r.keywords as string) ?? "",
         attempts: Number(r.attempts),
         clicks: Number(r.clicks),
@@ -615,7 +627,7 @@ export class ClickStore {
             startedAt: (summary.startedAt as string) ?? null,
             lastAt: (summary.lastAt as string) ?? null,
             domainCount: num(summary.domainCount),
-            devices: (summary.devices as string) ?? "",
+            devices: normDevices((summary.devices as string) ?? ""),
             keywords: (summary.keywords as string) ?? "",
             attempts: num(summary.attempts),
             clicks: num(summary.clicks),
@@ -627,7 +639,7 @@ export class ClickStore {
         attempts: num(r.attempts),
         clicks: num(r.clicks),
         reports: num(r.reports),
-        devices: (r.devices as string) ?? "",
+        devices: normDevices((r.devices as string) ?? ""),
         keywords: (r.keywords as string) ?? "",
         profiles: num(r.profiles),
       })),
