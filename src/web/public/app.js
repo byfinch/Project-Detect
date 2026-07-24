@@ -507,6 +507,7 @@ async function openOpDetail(operationId) {
   title.textContent = `Operasyon: ${operationId}`;
   body.innerHTML = `<div class="empty">Yükleniyor…</div>`;
   modal.classList.remove("hidden");
+  document.documentElement.classList.add("modal-open");
   document.body.classList.add("modal-open");
   try {
     const d = await API.get(`/api/ops/detail?operationId=${encodeURIComponent(operationId)}`);
@@ -599,6 +600,7 @@ async function openOpDetail(operationId) {
 
 function closeOpDetail() {
   document.getElementById("op-detail-modal")?.classList.add("hidden");
+  document.documentElement.classList.remove("modal-open");
   document.body.classList.remove("modal-open");
 }
 document.getElementById("op-detail-close")?.addEventListener("click", closeOpDetail);

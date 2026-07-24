@@ -1262,7 +1262,7 @@ tr.op-row:hover { background: var(--accent-soft); }
 
 /* ── Modal: above everything, page frozen behind ── */
 .modal { z-index: 1000; }
-body.modal-open { overflow: hidden; }
+html.modal-open, body.modal-open { overflow: hidden !important; }
 
 /* ── Scan form: 3-field row (cihaz + 2 switch) on one line ── */
 #scan-form .row {
