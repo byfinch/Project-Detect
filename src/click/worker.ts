@@ -12,6 +12,7 @@ import type { Device } from "../types.js";
 import type { ClickBehaviorConfig, ClickEvidence, ClickJob, ClickReportResult, ClickResult, ClickStatus } from "./types.js";
 import { behaveOnLanding, naturalWait } from "./behavior.js";
 import { behaviorForProfile, personaFor } from "../util/persona.js";
+import { appAdKey, isAppInstallAd } from "../util/appAds.js";
 import { openReportUi, fillReportForm, type ReportTask } from "../report/autoSerpReport.js";
 import { buildEvidencePaths, ensureEvidenceDir, screenshotPage } from "./evidence.js";
 import type { ClickStore } from "./store.js";
@@ -61,6 +62,16 @@ function matchAd(
   fallbackFirstAd = false
 ): ClickableTarget | null {
   const target = normalizeDomain(targetDomain);
+
+  // App-install target (app:brand): match Play ads by synthetic app identity.
+  if (target.startsWith("app:")) {
+    for (const ad of ads) {
+      if (isAppInstallAd(ad.displayDomain, ad.adHref) && appAdKey(ad.title, ad.adHref) === target) {
+        return { ...ad, isOrganic: false };
+      }
+    }
+    if (!fallbackFirstAd) return null;
+  }
 
   // Exact display domain match.
   for (const ad of ads) {
@@ -701,7 +712,10 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
           await page.goto(serpUrl, { waitUntil: "domcontentloaded", timeout: 25000 }).catch(() => {});
           await sleep(1200);
           const retryAds = await parseAds(page);
-          const retryAd = matchAd(retryAds, currentAd.displayDomain, currentAd.title, false);
+          // App ads share play.google.com — match the fresh SERP by app identity.
+          const retryKey =
+            appAdKey(currentAd.title, currentAd.adHref) ?? currentAd.displayDomain;
+          const retryAd = matchAd(retryAds, retryKey, currentAd.title, false);
           if (retryAd?.adHref) {
             const retryTarget = toClickable(retryAd);
             const retryRep = await maybeReportAdBeforeClick(ctx, page, jobForRecord, retryTarget, {
@@ -725,6 +739,15 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
     const hourAgoIso = new Date(Date.now() - 3_600_000).toISOString();
     const hourCap = Math.max(1, ctx.config.click.maxClicksPerProfilePerHour);
     const cooldownMs = Math.max(0, ctx.config.click.sameAdCooldownMinutes) * 60_000;
+    /**
+     * Advertiser identity for cooldown/dedupe: app-install ads all share the
+     * play.google.com display domain — without this they would collapse into
+     * ONE cooldown bucket and one dedupe entry. Web ads use their domain.
+     */
+    const identityOf = (a: (typeof ads)[number]): string =>
+      isAppInstallAd(a.displayDomain, a.adHref)
+        ? (appAdKey(a.title, a.adHref) ?? (a.displayDomain || ""))
+        : (a.displayDomain || "");
     const isCooling = (domain: string): boolean => {
       const d = domain.toLowerCase().replace(/^www\./, "");
       if (ctx.store.countRecentSuccesses(job.profileId, d, hourAgoIso) >= hourCap) return true;
@@ -734,7 +757,7 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
     const uniqueAds = (list: typeof ads): typeof ads => {
       const seen = new Set<string>();
       return list.filter((a) => {
-        const d = (a.displayDomain || "").toLowerCase().replace(/^www\./, "");
+        const d = identityOf(a).toLowerCase().replace(/^www\./, "");
         if (!d || seen.has(d)) return false;
         seen.add(d);
         return true;
@@ -744,7 +767,7 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
     if (!targetAd) {
       // Target not on this SERP — but other ads may exist. Harvest them instead
       // of walking away (they are betting ads for the same keyword).
-      const harvestable = uniqueAds(ads).filter((a) => a.adHref && !isCooling(a.displayDomain)).slice(0, 4);
+      const harvestable = uniqueAds(ads).filter((a) => a.adHref && !isCooling(identityOf(a))).slice(0, 4);
       if (harvestable.length === 0) {
         status = "skipped";
         error = `target ad not found for domain ${job.targetDomain}`;
@@ -755,7 +778,7 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
       let anySuccess = false;
       for (let i = 0; i < harvestable.length; i++) {
         const extra = toClickable(harvestable[i]!);
-        const extraJob: ClickJob = { ...job, id: `${job.id}-h${i}`, targetDomain: extra.displayDomain, targetTitle: extra.title };
+        const extraJob: ClickJob = { ...job, id: `${job.id}-h${i}`, targetDomain: identityOf(harvestable[i]!) || extra.displayDomain, targetTitle: extra.title };
         const r = await clickAndReportAd(extra, extraJob);
         ctx.store.insertClick(ctx.runId, { job: extraJob, status: r.status, evidence: r.evidence, error: r.error, capturedAt: new Date().toISOString(), report: r.reportResult });
         if (r.status === "success") anySuccess = true;
@@ -803,15 +826,15 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
     });
     reportResult = main.reportResult;
 
-    // 6. Harvest pass: other ads on the same SERP (unique domains, not cooling).
+    // 6. Harvest pass: other ads on the same SERP (unique identities, not cooling).
     const extras = uniqueAds(ads)
       .filter((a) => a.adHref)
-      .filter((a) => (a.displayDomain || "").toLowerCase().replace(/^www\./, "") !== (targetAd.displayDomain || "").toLowerCase().replace(/^www\./, ""))
-      .filter((a) => !isCooling(a.displayDomain))
+      .filter((a) => identityOf(a).toLowerCase().replace(/^www\./, "") !== identityOf(targetAd).toLowerCase().replace(/^www\./, ""))
+      .filter((a) => !isCooling(identityOf(a)))
       .slice(0, 4);
     for (let i = 0; i < extras.length; i++) {
       const extra = toClickable(extras[i]!);
-      const extraJob: ClickJob = { ...job, id: `${job.id}-h${i}`, targetDomain: extra.displayDomain, targetTitle: extra.title };
+      const extraJob: ClickJob = { ...job, id: `${job.id}-h${i}`, targetDomain: identityOf(extras[i]!) || extra.displayDomain, targetTitle: extra.title };
       const r = await clickAndReportAd(extra, extraJob);
       ctx.store.insertClick(ctx.runId, { job: extraJob, status: r.status, evidence: r.evidence, error: r.error, capturedAt: new Date().toISOString(), report: r.reportResult });
       logger.info({ jobId: job.id, extra: extra.displayDomain, status: r.status, report: r.reportResult.status }, "harvest: extra ad click+report done");

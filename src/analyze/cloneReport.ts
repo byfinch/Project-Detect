@@ -2,6 +2,7 @@ import type { Store } from "../store/db.js";
 import type { Device } from "../types.js";
 import type { TargetDevice } from "../click/types.js";
 import { isBettingGuess } from "./betting.js";
+import { appAdKey, isAppInstallAd } from "../util/appAds.js";
 
 export interface CloneAdHit {
   keyword: string;
@@ -58,6 +59,7 @@ interface ResultRow {
   description: string;
   display_domain: string;
   display_url: string;
+  ad_href: string | null;
   final_domain: string | null;
   is_betting: number;
   block: string;
@@ -148,11 +150,19 @@ export function analyzeScanClones(
         });
       if (!betting) continue;
     }
-    const key = normDomain(row.display_domain || row.final_domain || "");
+    let key = normDomain(row.display_domain || row.final_domain || "");
     if (!key || key === "unknown") continue;
-    // Google-owned shells (Play Store redirect etc.) are never a click target —
-    // keep them out of clone counting so a google-only scan plans nothing.
-    if (/(^|\.)google\.[a-z.]+$/i.test(key)) continue;
+    // Google-owned shells are never a click target — EXCEPT app-install ads:
+    // a play.google.com display domain hides the real advertiser (the betting
+    // app). Group those by synthetic app identity so a Play-only night still
+    // plans a campaign. Other google.* shells stay excluded.
+    if (/(^|\.)google\.[a-z.]+$/i.test(key)) {
+      const appKey = isAppInstallAd(row.display_domain, row.ad_href)
+        ? appAdKey(row.title, row.ad_href)
+        : null;
+      if (!appKey) continue;
+      key = appKey;
+    }
 
     const list = byDomain.get(key) ?? [];
     list.push(row);
@@ -161,7 +171,7 @@ export function analyzeScanClones(
 
   const clones: CloneAdSummary[] = [];
 
-  for (const [, list] of byDomain) {
+  for (const [key, list] of byDomain) {
     const mobileRows = list.filter((r) => r.device === "mobile");
     const desktopRows = list.filter((r) => r.device === "desktop");
     const mobileSeen = mobileRows.length > 0;
@@ -178,7 +188,9 @@ export function analyzeScanClones(
     ];
 
     clones.push({
-      domain: list[0]!.display_domain,
+      // App-install groups key on the synthetic identity (app:brand) — that is
+      // the ClickTarget domain downstream; web groups keep the display domain.
+      domain: key.startsWith("app:") ? key : list[0]!.display_domain,
       finalDomains,
       titles,
       keywords,
