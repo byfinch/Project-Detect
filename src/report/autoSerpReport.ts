@@ -328,6 +328,57 @@ async function clickCardOpener(
         }
         return null; // target card found but no opener inside — don't touch other cards
       }
+
+      // App-install fallback: Play install cards don't always carry the classic
+      // ad-container attributes, so the selector list above can miss them.
+      // Walk up from a Play/aclk anchor to a container, then hunt the opener.
+      const tryOpenerIn = (root: Element): string | null => {
+        const btns = Array.from(root.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+        for (const b of btns) {
+          const aria = (b.getAttribute("aria-label") || "").toLowerCase();
+          if (aria && ariaStems.some((s) => aria.includes(s)) && b.getBoundingClientRect().width > 0) {
+            b.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
+            b.click();
+            return b.getAttribute("aria-label") || "opener";
+          }
+        }
+        for (const b of btns) {
+          const text = (b.textContent || "").trim();
+          const r = b.getBoundingClientRect();
+          if (r.width > 0 && r.width <= 48 && text.length <= 2) {
+            b.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
+            b.click();
+            return b.getAttribute("aria-label") || "icon-opener";
+          }
+        }
+        return null;
+      };
+      const anchors = Array.from(
+        document.querySelectorAll('a[href*="play.google.com"], a[href*="/aclk"], a[href*="intent://"]')
+      ) as HTMLAnchorElement[];
+      // Strict pass first (this exact app/ad); a loose Play card is only the
+      // last resort so we never open the WRONG app's menu on a multi-app SERP.
+      let loose: Element | null = null;
+      for (const a of anchors) {
+        const card = a.closest("[data-hveid], [data-text-ad], [data-pcu], li, div");
+        if (!card) continue;
+        const heading = card.querySelector('[role="heading"], h3');
+        const title = (heading?.textContent || "").trim();
+        const cardText = (card.textContent || "").toLowerCase();
+        const strict =
+          (h && title.toLowerCase().includes(h.toLowerCase())) ||
+          (t && cardText.includes(t));
+        if (strict) {
+          const hit = tryOpenerIn(card);
+          if (hit) return hit;
+        } else if (!loose && /play\.google\.com/.test(cardText)) {
+          loose = card;
+        }
+      }
+      if (loose) {
+        const hit = tryOpenerIn(loose);
+        if (hit) return hit;
+      }
       return null;
     },
     { target, titleHint, ariaStems: OPENER_ARIA }
