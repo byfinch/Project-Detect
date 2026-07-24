@@ -41,6 +41,12 @@ export interface InlineClickOpts {
   /** Profile proxy for CapSolver AntiCloudflare (needs the SAME exit IP). */
   captchaProxy?: { proxy: string; proxytype: "HTTP" | "HTTPS" | "SOCKS4" | "SOCKS5" };
   onProgress?: (event: Record<string, unknown>) => void;
+  /**
+   * Internal: set by the WithCap wrapper when the HARD timeout fires.
+   * The loop stops at the next ad boundary and skips recording — a reaped run
+   * must not write phantom success rows after the caller already moved on.
+   */
+  abortSignal?: { aborted: boolean };
 }
 
 export interface InlineClickSummary {
@@ -143,24 +149,40 @@ export class InlineClickTimeoutError extends Error {
  * leg forever — puppeteer protocol calls have no default timeout. On expiry
  * the caller MUST close the profile browser: that rejects the hung CDP
  * promises and lets the background invocation die.
- * Budget: ~4 min per ad (report flow + resolve + click + Cloudflare + behave)
- * plus 2 min margin — generous on purpose, this guard is for true wedges only.
+ *
+ * Two-stage guard (lesson from 3 live false-positives): a slow-but-healthy
+ * mobile flow (report + resolve + CF + behave) can legitimately pass 4m/ad.
+ * First stage only warns and starts a grace window; the reap (and profile
+ * kill) happens solely if the flow is STILL running after grace — that is the
+ * true wedge. An aborted run stops recording via opts.abortSignal, so no
+ * phantom "success" rows appear after the caller has moved on.
  */
 export async function clickAdsOnOpenSerpWithCap(opts: InlineClickOpts): Promise<InlineClickSummary> {
-  const capMs = Math.min(opts.maxClicks ?? 3, opts.ads.length) * 240_000 + 120_000;
-  let timer: NodeJS.Timeout | undefined;
+  const adCount = Math.min(opts.maxClicks ?? 3, opts.ads.length);
+  const capMs = adCount * 300_000 + 120_000;
+  const GRACE_MS = 180_000;
+  const abortSignal = { aborted: false };
+  let capTimer: NodeJS.Timeout | undefined;
+  let graceTimer: NodeJS.Timeout | undefined;
   try {
-    return await Promise.race([
-      clickAdsOnOpenSerp(opts),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new InlineClickTimeoutError(`inline click hard timeout (${Math.round(capMs / 60000)}m)`)),
-          capMs
-        );
-      }),
-    ]);
+    return await new Promise<InlineClickSummary>((resolve, reject) => {
+      clickAdsOnOpenSerp({ ...opts, abortSignal }).then(resolve, reject);
+      capTimer = setTimeout(() => {
+        logger.warn({ adCount, capMs }, "inline click over budget — grace window before reap (not a wedge yet)");
+        opts.onProgress?.({
+          type: "scan-progress",
+          phase: "inline-click-late",
+          message: "Inline tık süre bütçesini aştı · 3 dk ek süre tanındı (kilitlenme değilse tamamlanacak)",
+        });
+        graceTimer = setTimeout(() => {
+          abortSignal.aborted = true;
+          reject(new InlineClickTimeoutError(`inline click hard timeout (${Math.round((capMs + GRACE_MS) / 60000)}m)`));
+        }, GRACE_MS);
+      }, capMs);
+    });
   } finally {
-    if (timer) clearTimeout(timer);
+    if (capTimer) clearTimeout(capTimer);
+    if (graceTimer) clearTimeout(graceTimer);
   }
 }
 
@@ -226,6 +248,11 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
   const serpUrl = page.url();
 
   for (let i = 0; i < targets.length; i++) {
+    // Reaped by the WithCap hard timeout — stop at the boundary, record nothing.
+    if (opts.abortSignal?.aborted) {
+      logger.warn({ profileId, done: i, total: targets.length }, "inline click aborted by hard timeout — skipping remaining ads");
+      break;
+    }
     const ad = targets[i]!;
     const domain = norm(ad.finalDomain || ad.displayDomain);
     const job: ClickJob = {
@@ -432,6 +459,9 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
     if (reportResult.status === "submitted" || reportResult.status === "filled") {
       reported++;
     }
+    // A reaped run (hard timeout) must not write phantom rows/events — the
+    // caller already logged the wedge and moved on.
+    if (opts.abortSignal?.aborted) break;
     const result: ClickResult = { job, status, evidence, error, capturedAt, report: reportResult };
     store.insertClick(runId, result);
 
