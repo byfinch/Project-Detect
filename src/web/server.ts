@@ -582,6 +582,7 @@ export function createWebServer(port: number): void {
   // Page guard: unauthenticated visitors get the login screen, never the panel.
   app.use((req: Request, res: Response, next) => {
     if ((req.path === "/" || req.path === "/index.html") && !hasSession(req)) {
+      res.setHeader("Cache-Control", "no-store");
       res.sendFile(resolve(PUBLIC_DIR, "login.html"));
       return;
     }
