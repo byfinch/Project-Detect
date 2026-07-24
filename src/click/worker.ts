@@ -148,11 +148,35 @@ async function firstOrganicResult(page: Page): Promise<ClickableTarget | null> {
 async function openProfile(ctx: WorkerContext, profileId: string, device: Device): Promise<BrowserSession | null> {
   let session: BrowserSession | null = null;
   try {
-    const ws = await ctx.adsClient.ensureBrowser(profileId);
+    // AdsPower transient open failures (zombie browser, CDP refused, stale lock)
+    // are common — one stop+retry recovers most of them instead of burning the
+    // job as profile_error (26 of 766 attempts in a live op).
+    let ws: string | null = null;
+    for (let openAttempt = 1; openAttempt <= 2; openAttempt++) {
+      try {
+        ws = await ctx.adsClient.ensureBrowser(profileId);
+        break;
+      } catch (err) {
+        if (openAttempt === 2) throw err;
+        logger.warn({ profileId, err: String(err) }, "click worker: profile open failed — stop + single retry");
+        await ctx.adsClient.stopBrowser(profileId).catch(() => {});
+        await sleep(2_000);
+      }
+    }
+    if (!ws) throw new Error("ensureBrowser returned no ws endpoint");
     // Mark immediately after ensureBrowser, BEFORE the CDP attach — otherwise
     // the reaper can kill this browser in the window between the two calls.
     markProfileInUse(profileId);
-    session = await BrowserSession.attach(ws);
+    try {
+      session = await BrowserSession.attach(ws);
+    } catch (attachErr) {
+      // CDP attach refused = zombie — kill and retry attach once on a fresh boot.
+      logger.warn({ profileId, err: String(attachErr) }, "click worker: CDP attach failed — reboot browser + retry once");
+      await ctx.adsClient.stopBrowser(profileId).catch(() => {});
+      await sleep(2_000);
+      const ws2 = await ctx.adsClient.ensureBrowser(profileId);
+      session = await BrowserSession.attach(ws2);
+    }
     await prepareGoogleConsent(session);
     if (device === "mobile") {
       const { applyMobileEmulation } = await import("../browser/mobileEmulation.js");
