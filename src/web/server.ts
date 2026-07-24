@@ -596,6 +596,10 @@ export function createWebServer(port: number): void {
         // (a cached index.html hid new form controls from the user already).
         if (/\.html?$/i.test(filePath)) {
           res.setHeader("Cache-Control", "no-store");
+        } else if (/\.(js|css)$/i.test(filePath)) {
+          // Force revalidation on every load — stale app.js/style.css caused
+          // the same class of ghost bugs (old modal behaviour lingering).
+          res.setHeader("Cache-Control", "no-cache");
         }
       },
     })

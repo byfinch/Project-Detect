@@ -1271,3 +1271,14 @@ body.modal-open { overflow: hidden; }
   align-items: end;
   column-gap: 28px;
 }
+
+/* ── Modal scroll polish: no scroll-chain to page, scrollbar not hugging content ── */
+.modal { overscroll-behavior: contain; }
+.modal-card { overflow: hidden; }
+.modal-body {
+  padding-right: 16px;
+  margin-right: 2px;
+  scrollbar-gutter: stable;
+}
+.modal-body::-webkit-scrollbar { width: 10px; }
+.modal-body::-webkit-scrollbar-track { background: transparent; margin: 6px 0; }
