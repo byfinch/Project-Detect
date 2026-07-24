@@ -43,6 +43,27 @@ function shuffleInPlace<T>(arr: T[]): T[] {
  *  3) Never stack 10 clicks on the same profile for one domain.
  *  4) If budget > unique profiles, second round only after full rotation (still 1/profile/round).
  */
+/**
+ * Root-keyword expansion: an ad proven under "herabet bonus" almost always
+ * also bids on the root auction "herabet". Add first-token roots of variant
+ * keywords to the click rotation (generic auctions like "casino siteleri"
+ * are already roots — excluded by the stoplist).
+ */
+const ROOT_STOPLIST = new Set(["casino", "bahis", "slot", "canlı", "canli", "deneme", "güvenilir", "guvenilir", "yeni", "güncel", "guncel"]);
+function withRootKeywords(keywords: string[]): string[] {
+  const out = [...keywords];
+  const seen = new Set(keywords.map((k) => k.toLocaleLowerCase("tr")));
+  for (const kw of keywords) {
+    const tokens = kw.trim().split(/\s+/);
+    if (tokens.length < 2) continue;
+    const root = tokens[0]!.toLocaleLowerCase("tr");
+    if (root.length < 4 || ROOT_STOPLIST.has(root) || seen.has(root)) continue;
+    seen.add(root);
+    out.push(root);
+  }
+  return out;
+}
+
 export function buildJobs(opts: ClickRunOptions): ClickJob[] {
   const {
     target,
@@ -93,12 +114,13 @@ export function buildJobs(opts: ClickRunOptions): ClickJob[] {
   }
 
   // Prefer keyword that profile actually saw when available.
+  const kwPool = withRootKeywords(target.keywords);
   const keywordFor = (profileId: string, device: Device, fallbackIndex: number): string => {
     const hit = (target.impressions ?? []).find(
       (i) => i.profileId === profileId && i.device === device && i.keyword
     );
     if (hit?.keyword) return hit.keyword;
-    return target.keywords[fallbackIndex % Math.max(1, target.keywords.length)] ?? target.keywords[0] ?? "search";
+    return kwPool[fallbackIndex % Math.max(1, kwPool.length)] ?? kwPool[0] ?? "search";
   };
 
   for (const [device, poolIds] of byDevice) {
