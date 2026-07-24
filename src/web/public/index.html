@@ -232,20 +232,6 @@
           <div id="op-results-pager" class="pager"></div>
         </div>
       </section>
-
-      <!-- Operation detail modal -->
-      <div id="op-detail-modal" class="modal hidden">
-        <div class="modal-card">
-          <div class="modal-head">
-            <div>
-              <h2 id="op-detail-title">Operasyon</h2>
-              <div id="op-detail-meta" class="op-meta"></div>
-            </div>
-            <button id="op-detail-close" class="pager-btn">Kapat ✕</button>
-          </div>
-          <div id="op-detail-body" class="modal-body"></div>
-        </div>
-      </div>
     </div>
 
     <!-- ═══ KANIT ═══ -->
@@ -322,6 +308,21 @@
       </section>
     </div>
   </main>
+
+  <!-- Operation detail modal — direct child of body: fixed positioning breaks
+       inside transformed/animated ancestors (panel sections). -->
+  <div id="op-detail-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <h2 id="op-detail-title">Operasyon</h2>
+          <div id="op-detail-meta" class="op-meta"></div>
+        </div>
+        <button id="op-detail-close" class="pager-btn">Kapat ✕</button>
+      </div>
+      <div id="op-detail-body" class="modal-body"></div>
+    </div>
+  </div>
 
   <script src="/app.js"></script>
 </body>

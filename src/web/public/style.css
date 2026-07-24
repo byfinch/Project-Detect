@@ -1259,3 +1259,15 @@ tr.op-row:hover { background: var(--accent-soft); }
   border-style: dashed;
   cursor: not-allowed;
 }
+
+/* ── Modal: above everything, page frozen behind ── */
+.modal { z-index: 1000; }
+body.modal-open { overflow: hidden; }
+
+/* ── Scan form: 3-field row (cihaz + 2 switch) on one line ── */
+#scan-form .row {
+  grid-template-columns: minmax(190px, 250px) auto auto;
+  justify-content: start;
+  align-items: end;
+  column-gap: 28px;
+}
