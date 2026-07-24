@@ -63,9 +63,9 @@
     "staggerWindowSeconds": 300,
     "minDelayMs": 3000,
     "maxDelayMs": 10000,
-    "maxClicksPerProfilePerHour": 2,
-    "sameAdCooldownMinutes": 20,
-    "maxProfilesPerDevice": 10,
+    "maxClicksPerProfilePerHour": 3,
+    "sameAdCooldownMinutes": 12,
+    "maxProfilesPerDevice": 20,
     "behavior": {
       "minPreClickMs": 5000,
       "maxPreClickMs": 15000,

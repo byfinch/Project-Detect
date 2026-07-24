@@ -299,6 +299,7 @@ export async function runFocusCampaign(opts: {
 
       // Inner loop: click waves on THIS domain only until window ends.
       let consecutiveWaveErrors = 0;
+      let emptyWaveStreak = 0;
       const imp = picked.target.impressions ?? [];
       const budget = waveBudget(picked.target.targetDevice, {
         mobileHits: imp.filter((i) => i.device === "mobile").length,
@@ -347,8 +348,18 @@ export async function runFocusCampaign(opts: {
           state.failedClicks += summary.failedJobs;
           state.skippedClicks += summary.skippedJobs;
           consecutiveWaveErrors = 0;
+          // Empty-wave damping: a wave with ZERO clicks means the auction is
+          // dead right now (night supply). Full-speed waves then burn profiles
+          // AND feed Google's distrust (649 empty hits in one live window).
+          // Back the cadence off x2 (60s→2m→4m→8m cap); first click resets.
+          if (summary.completedJobs > 0) {
+            emptyWaveStreak = 0;
+          } else {
+            emptyWaveStreak += 1;
+          }
           publish(
-            `Dalga ${state.wave} bitti · ${picked.target.domain} · +${summary.completedJobs} ok · toplam ok=${state.completedClicks}`
+            `Dalga ${state.wave} bitti · ${picked.target.domain} · +${summary.completedJobs} ok · toplam ok=${state.completedClicks}` +
+              (emptyWaveStreak > 0 ? ` · boş seri=${emptyWaveStreak} → tempo yavaşladı` : "")
           );
         } catch (err) {
           const msg = String(err);
@@ -368,9 +379,14 @@ export async function runFocusCampaign(opts: {
           await sleepCancellable(coolWait);
         }
 
-        // Short gap between waves (avoid hammering API / AdsPower)
+        // Gap between waves: base 8s, damped exponentially while waves come
+        // back empty (60s → 2m → 4m → 8m cap). Any click resets the streak.
         if (Date.now() < windowEndMs && !cancelled()) {
-          await sleepCancellable(8000);
+          const gapMs =
+            emptyWaveStreak === 0
+              ? 8_000
+              : Math.min(480_000, 60_000 * 2 ** (emptyWaveStreak - 1));
+          await sleepCancellable(gapMs);
         }
       }
 
