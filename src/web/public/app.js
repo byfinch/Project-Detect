@@ -522,11 +522,15 @@ async function openOpDetail(operationId) {
       chipHtml("Başarı", "%" + pct, true),
       chipHtml("Deneme", s.attempts),
       chipHtml("Domain", s.domainCount),
-      chipHtml("Cihaz", s.devices || "—"),
-      chipHtml("Süre", dur),
-      chipHtml("Başlangıç", fmtDT(s.startedAt)),
-      chipHtml("Son aktivite", fmtDT(s.lastAt)),
     ].join("");
+
+    // Meta line under the title — device/duration/dates have no room inside
+    // chips and always ellipsized; here they get the full modal width.
+    const metaEl = document.getElementById("op-detail-meta");
+    if (metaEl) {
+      const arrow = `${fmtDT(s.startedAt)} → ${fmtDT(s.lastAt)}`;
+      metaEl.textContent = `${s.devices || "—"} · süre ${dur} · ${arrow}`;
+    }
 
     const STATUS_STYLE = {
       success: "st-ok",
