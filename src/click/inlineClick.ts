@@ -336,7 +336,7 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
             failed,
             skipped,
             total: targets.length,
-            message: `inline tık ${status} (renderer ölü) · ${domain} · ${profileKey}`,
+            message: `inline tık ${status} (renderer ölü) · rapor ${reportResult.status} · ${domain} · ${profileKey}`,
           });
         }
         break;
@@ -539,12 +539,13 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
       profileId,
       profileName: profileKey,
       status,
+      reportStatus: reportResult.status,
       stayMs: evidence.stayMs,
       completed,
       failed,
       skipped,
       total: targets.length,
-      message: `inline tık ${status} · ${domain} · ${profileKey} (${completed + failed + skipped}/${targets.length})`,
+      message: `inline tık ${status} · rapor ${reportResult.status} · ${domain} · ${profileKey} (${completed + failed + skipped}/${targets.length})`,
     });
 
     logger.info(
@@ -573,8 +574,9 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
     completed,
     failed,
     skipped,
+    reported,
     profileName: profileKey,
-    message: `inline tık bitti · ${completed} ok / ${targets.length} · ${profileKey}`,
+    message: `inline tık bitti · ${completed} ok · ${reported} rapor · ${targets.length} hedef · ${profileKey}`,
   });
 
   return {
