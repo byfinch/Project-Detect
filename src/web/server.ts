@@ -588,7 +588,17 @@ export function createWebServer(port: number): void {
     next();
   });
 
-  app.use(express.static(PUBLIC_DIR));
+  app.use(
+    express.static(PUBLIC_DIR, {
+      setHeaders(res, filePath) {
+        // HTML must never come from a stale cache — the panel evolves daily
+        // (a cached index.html hid new form controls from the user already).
+        if (/\.html?$/i.test(filePath)) {
+          res.setHeader("Cache-Control", "no-store");
+        }
+      },
+    })
+  );
 
   // API guard: everything under /api except login/logout requires a session.
   app.use("/api", (req: Request, res: Response, next) => {
