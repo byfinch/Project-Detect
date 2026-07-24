@@ -618,6 +618,10 @@ interface WorkerState {
   queriesOnProfile: number;
   /** Set when a withScanStepCap timeout fired mid-openNext — the zombie must not claim state. */
   timedOut?: boolean;
+  /** Wedge guard: profile to REVIVE (reopen + hand its work back) on next open. */
+  wedgeRevive?: string;
+  /** Profiles already revived once this scan — a second wedge parks them. */
+  wedgeRevivedIds?: Set<string>;
 }
 
 interface SwarmTarget {
@@ -1186,11 +1190,32 @@ async function runDeviceScan(
         const wedgeGuard = setInterval(() => {
           const silentMs = Date.now() - lastActivity;
           if (state.profileId && silentMs > 7 * 60_000) {
-            logger.error(
-              { device, worker: w, profileId: state.profileId, silentMs },
-              "scan worker silent 7m+ — force-closing profile browser (wedge guard)"
-            );
-            void ads.stopBrowser(state.profileId).catch(() => {});
+            const stuckId = state.profileId;
+            const alreadyRevived = state.wedgeRevivedIds?.has(stuckId) ?? false;
+            if (!alreadyRevived) {
+              // "Takıldın — kaldığın işe devam et": kill the frozen renderer
+              // (dead CDP takes no commands), then REOPEN THE SAME profile and
+              // hand its assignment back via wedgeRevive. Once per profile.
+              (state.wedgeRevivedIds ??= new Set()).add(stuckId);
+              state.wedgeRevive = stuckId;
+              logger.error(
+                { device, worker: w, profileId: stuckId, silentMs },
+                "scan worker silent 7m+ — reviving SAME profile: force-close + reopen + continue its work"
+              );
+              onProgress?.({
+                type: "scan-progress",
+                device,
+                profileId: stuckId,
+                message: `Takılma tespit · profil kendine işi geri veriliyor (yeniden açılıyor)`,
+                phase: "wedge-revive",
+              });
+            } else {
+              logger.error(
+                { device, worker: w, profileId: stuckId, silentMs },
+                "scan worker silent 7m+ AGAIN after revive — parking profile (no second revive)"
+              );
+            }
+            void ads.stopBrowser(stuckId).catch(() => {});
             lastActivity = Date.now(); // one full window for the unwind
           }
         }, 30_000);
@@ -1217,7 +1242,10 @@ async function runDeviceScan(
               profileOpenController.abort(new Error("profile open timeout"));
             }, 90_000);
             try {
-              ok = await withScanStepCap(openNext(state, profileOpenController.signal), "profile open", () => {
+              // Wedge revive: the SAME profile gets its work back (once).
+              const forceId = state.wedgeRevive;
+              state.wedgeRevive = undefined;
+              ok = await withScanStepCap(openNext(state, profileOpenController.signal, forceId), "profile open", () => {
                 state.timedOut = true;
               });
             } catch (err) {
