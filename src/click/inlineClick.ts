@@ -304,7 +304,13 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
         Math.min(personaBehavior.maxPreClickMs, 2800)
       );
 
-      const anchor = await findAnchor(page, ad);
+      // findAnchor runs page.evaluate with NO protocol timeout — on a renderer
+      // frozen by an intent:// redirect (Play app ads on mobile) it hangs
+      // forever (seen live: 3 wedges). Cap it; null falls to the aclk fallback.
+      const anchor = await Promise.race([
+        findAnchor(page, ad),
+        sleep(15_000).then(() => null),
+      ]);
       if (!anchor && !ad.adHref) {
         status = "skipped";
         error = "anchor not found on open SERP";
@@ -427,9 +433,14 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
           evidence.finalUrl = null;
           evidence.finalDomain = null;
         } else {
-          const behaviour = await behaveOnLanding(landing, device, personaBehavior, profileKey);
-          evidence.stayMs = behaviour.stayMs;
-          evidence.internalClicks = behaviour.internalClicks;
+          // behaveOnLanding evaluates can hang on a frozen renderer (intent://
+          // redirect) — bound the whole behaviour block, evidence stays partial.
+          const behaviour = await Promise.race([
+            behaveOnLanding(landing, device, personaBehavior, profileKey),
+            sleep(90_000).then(() => null),
+          ]);
+          evidence.stayMs = behaviour?.stayMs ?? 0;
+          evidence.internalClicks = behaviour?.internalClicks ?? 0;
           evidence.finalUrl = landing.url();
           try {
             evidence.finalDomain = new URL(landing.url()).hostname.replace(/^www\./, "");
