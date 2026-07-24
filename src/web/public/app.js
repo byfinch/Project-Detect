@@ -406,6 +406,15 @@ const OP_RESULTS_LIMIT = 5;
 let proofPage = 1;
 const PROOF_LIMIT = 5;
 
+/** Compact date-time for tight table cells/chips: "24.07 04:52". */
+function fmtDT(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  const dd = d.toLocaleDateString("tr-TR", { day: "2-digit", month: "2-digit" });
+  const tt = d.toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" });
+  return `${dd} ${tt}`;
+}
+
 function proofFilterQs() {
   const kw = document.getElementById("proof-filter-keyword")?.value.trim();
   const dom = document.getElementById("proof-filter-domain")?.value.trim();
@@ -472,7 +481,7 @@ function renderOpResults(data) {
         <td>${r.clicks}</td>
         <td>${r.reports}</td>
         <td class="muted">%${pct(r)}</td>
-        <td class="muted">${r.startedAt ? new Date(r.startedAt).toLocaleString("tr-TR") : "—"}</td>
+        <td class="muted" title="${r.startedAt ? new Date(r.startedAt).toLocaleString("tr-TR") : ""}">${fmtDT(r.startedAt)}</td>
       </tr>`
     )
     .join("");
@@ -506,8 +515,8 @@ async function openOpDetail(operationId) {
       ? Math.max(1, Math.round((new Date(s.lastAt) - new Date(s.startedAt)) / 60000)) + " dk"
       : "—";
     const chips = [
-      ["Başlangıç", s.startedAt ? new Date(s.startedAt).toLocaleString("tr-TR") : "—"],
-      ["Son aktivite", s.lastAt ? new Date(s.lastAt).toLocaleString("tr-TR") : "—"],
+      ["Başlangıç", fmtDT(s.startedAt)],
+      ["Son aktivite", fmtDT(s.lastAt)],
       ["Süre", dur],
       ["Cihaz", s.devices || "—"],
       ["Domain", s.domainCount],

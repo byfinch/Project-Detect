@@ -1198,3 +1198,24 @@ tbody tr:hover td { background: rgba(0, 255, 157, 0.04); }
 
 tr.op-row { cursor: pointer; transition: background 0.12s ease; }
 tr.op-row:hover { background: var(--accent-soft); }
+
+/* ── Ops table: no awkward wraps, ellipsis where long ── */
+#tbl-op-results { table-layout: auto; width: 100%; }
+#tbl-op-results td, #tbl-op-results th {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 170px;
+}
+#tbl-op-results td:nth-child(2) { white-space: normal; max-width: 220px; } /* keyword */
+#tbl-op-results td.mono { max-width: 130px; }
+
+/* Chips: even height, values never overflow */
+.op-chips { grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); }
+.op-chip { min-height: 52px; overflow: hidden; }
+.op-chip-v {
+  font-size: 13.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
