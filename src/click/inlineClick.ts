@@ -304,6 +304,44 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
         Math.min(personaBehavior.maxPreClickMs, 2800)
       );
 
+      // Renderer liveness probe (5s): a renderer frozen by an intent:// redirect
+      // (Play app ads) makes every later call burn its own cap — wedges summed
+      // to 10m on a dead profile (seen live, same profile twice). Probe first:
+      // dead renderer → report (if any) is already out, skip the click and bail
+      // the whole profile — later ads hit the same frozen renderer.
+      const rendererAlive = await Promise.race([
+        page.evaluate(() => 1).then(() => true, () => false),
+        sleep(5_000).then(() => false),
+      ]);
+      if (!rendererAlive) {
+        status = "skipped";
+        error = "renderer frozen before click phase (intent redirect?) — profile bailed early";
+        skipped++;
+        if (reportResult.status === "submitted" || reportResult.status === "filled") reported++;
+        logger.warn({ domain, profileId }, "inline: renderer dead before click — bailing profile early");
+        if (!opts.abortSignal?.aborted) {
+          store.insertClick(runId, { job, status, evidence, error, capturedAt, report: reportResult });
+          onProgress?.({
+            type: "click-done",
+            inline: true,
+            runId,
+            jobId: job.id,
+            domain,
+            device,
+            profileId,
+            profileName: profileKey,
+            status,
+            stayMs: 0,
+            completed,
+            failed,
+            skipped,
+            total: targets.length,
+            message: `inline tık ${status} (renderer ölü) · ${domain} · ${profileKey}`,
+          });
+        }
+        break;
+      }
+
       // findAnchor runs page.evaluate with NO protocol timeout — on a renderer
       // frozen by an intent:// redirect (Play app ads on mobile) it hangs
       // forever (seen live: 3 wedges). Cap it; null falls to the aclk fallback.
