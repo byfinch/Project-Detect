@@ -898,6 +898,43 @@ async function runDeviceScan(
         phase: "profile-open",
       });
       const state: WorkerState = { session: null, profileId: null, queriesOnProfile: 0 };
+      /**
+       * Wedge guard (protect-pool twin of the shared-queue one — the 12:20 scan
+       * proved this path had NO coverage: inline flow froze 10m+ with zero logs).
+       * 7m silent → force-close; the loop revives the SAME pinned profile below
+       * (wedgeRevive) and hands its keyword list back. Once per profile.
+       */
+      let lastActivity = Date.now();
+      const bump = () => {
+        lastActivity = Date.now();
+      };
+      const wedgeGuard = setInterval(() => {
+        const silentMs = Date.now() - lastActivity;
+        if (state.profileId && silentMs > 7 * 60_000) {
+          const stuckId = state.profileId;
+          const alreadyRevived = state.wedgeRevivedIds?.has(stuckId) ?? false;
+          if (!alreadyRevived) {
+            (state.wedgeRevivedIds ??= new Set()).add(stuckId);
+            state.wedgeRevive = stuckId;
+            logger.error(
+              { device, profileId: stuckId, silentMs },
+              "protect-pool profile silent 7m+ — reviving SAME profile (force-close + reopen + continue)"
+            );
+            onProgress?.({
+              type: "scan-progress",
+              device,
+              profileId: stuckId,
+              message: `Takılma tespit · ${pnameHint} tazelenip işine döndürülüyor`,
+              phase: "wedge-revive",
+            });
+          } else {
+            logger.error({ device, profileId: stuckId, silentMs }, "protect-pool profile silent 7m+ again — parking (no second revive)");
+          }
+          void ads.stopBrowser(stuckId).catch(() => {});
+          lastActivity = Date.now();
+        }
+      }, 30_000);
+      try {
       // Parallel protect mode pins this exact profile (never a substitute IP).
       const ok = await withScanStepCap(openNext(state, signal, profileId), `profile open (${pnameHint})`, () => {
         state.timedOut = true;
@@ -943,6 +980,19 @@ async function runDeviceScan(
       // (~25s × 45) — now every 3rd keyword, the session is already warm.
       // Mobile: brands back-to-back (single-pass brand only).
       for (let ki = 0; ki < profileKeywords.length; ki++) {
+        bump();
+        // Wedge revive: reopen the SAME pinned profile and continue its list.
+        if (state.wedgeRevive) {
+          const reviveId = state.wedgeRevive;
+          state.wedgeRevive = undefined;
+          logger.info({ device, profileId: reviveId, remainingKeywords: profileKeywords.length - ki }, "wedge revive: reopening pinned profile, continuing keyword list");
+          await closeState(state).catch(() => {});
+          const rok = await withScanStepCap(openNext(state, signal, reviveId), `wedge revive open (${pnameHint})`).catch(() => false);
+          if (!rok || !state.session) {
+            logger.warn({ device, profileId: reviveId }, "wedge revive open failed — parking profile");
+            break;
+          }
+        }
         if (swarmTarget) {
           logger.info({ device, profile: pname, keyword: swarmTarget.keyword, domain: swarmTarget.ad.displayDomain }, "swarm: target locked, stopping scan worker");
           await closeState(state);
@@ -1151,6 +1201,9 @@ async function runDeviceScan(
             : `Son profil kapandı: ${pname} (${device}) · cihaz havuzu bitti`,
         phase: "profile-closed",
       });
+      } finally {
+        clearInterval(wedgeGuard);
+      }
     };
     // All pool profiles in parallel (light stagger avoids an AdsPower API burst).
     // 5+5 across devices matches the click engine's proven load.
