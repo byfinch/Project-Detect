@@ -514,19 +514,31 @@ async function openOpDetail(operationId) {
     const dur = s.startedAt && s.lastAt
       ? Math.max(1, Math.round((new Date(s.lastAt) - new Date(s.startedAt)) / 60000)) + " dk"
       : "—";
+    const chipHtml = (k, v, hero = false) =>
+      `<div class="op-chip${hero ? " hero" : ""}"><div class="op-chip-k">${k}</div><div class="op-chip-v">${v}</div></div>`;
     const chips = [
-      ["Başlangıç", fmtDT(s.startedAt)],
-      ["Son aktivite", fmtDT(s.lastAt)],
-      ["Süre", dur],
-      ["Cihaz", s.devices || "—"],
-      ["Domain", s.domainCount],
-      ["Deneme", s.attempts],
-      ["Tıklama", s.clicks],
-      ["Şikayet", s.reports],
-      ["Başarı", "%" + pct],
-    ].map(([k, v]) => `<div class="op-chip"><div class="op-chip-k">${k}</div><div class="op-chip-v">${v}</div></div>`).join("");
+      chipHtml("Tıklama", s.clicks, true),
+      chipHtml("Şikayet", s.reports, true),
+      chipHtml("Başarı", "%" + pct, true),
+      chipHtml("Deneme", s.attempts),
+      chipHtml("Domain", s.domainCount),
+      chipHtml("Cihaz", s.devices || "—"),
+      chipHtml("Süre", dur),
+      chipHtml("Başlangıç", fmtDT(s.startedAt)),
+      chipHtml("Son aktivite", fmtDT(s.lastAt)),
+    ].join("");
 
-    const statusTxt = (d.byStatus || []).map((x) => `${x.status}: ${x.n}`).join(" · ");
+    const STATUS_STYLE = {
+      success: "st-ok",
+      failed: "st-err",
+      profile_error: "st-err",
+      captcha: "st-warn",
+      skipped: "st-dim",
+      running: "st-info",
+    };
+    const statusPills = (d.byStatus || [])
+      .map((x) => `<span class="st-pill ${STATUS_STYLE[x.status] || "st-dim"}">${esc(x.status)} <b>${x.n}</b></span>`)
+      .join("");
     const domainRows = (d.byDomain || []).map((x) => {
       const p = x.attempts > 0 ? Math.round((x.clicks / x.attempts) * 100) : 0;
       return `<tr>
@@ -556,7 +568,7 @@ async function openOpDetail(operationId) {
 
     body.innerHTML = `
       <div class="op-chips">${chips}</div>
-      <div class="muted" style="margin:6px 0 14px">Durum dağılımı: ${esc(statusTxt || "—")}</div>
+      <div class="op-status-row">${statusPills || `<span class="st-pill st-dim">veri yok</span>`}</div>
       <h3 class="op-sec">Site Bazında</h3>
       <div class="table-wrap"><table class="op-detail-table"><thead><tr>
         <th>Domain</th><th>Keyword</th><th>Cihaz</th><th>Profil</th><th>Deneme</th><th>Tık</th><th>Rapor</th><th>Başarı</th>
