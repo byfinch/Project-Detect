@@ -92,6 +92,32 @@ const scheduledScan: ScheduledScanState = {
   lastJobId: null,
 };
 
+/**
+ * Persist the auto-scan toggle — it used to live in memory only, so every
+ * service restart silently re-enabled a schedule the user had turned OFF
+ * (and a disabled schedule skips slots with zero log lines — hard to debug).
+ */
+function panelSettingsPath(outputDir: string): string {
+  return resolve(outputDir, "panel-settings.json");
+}
+
+function loadScheduledScanEnabled(outputDir: string): void {
+  try {
+    const raw = JSON.parse(readFileSync(panelSettingsPath(outputDir), "utf8")) as { scheduledScanEnabled?: boolean };
+    if (typeof raw.scheduledScanEnabled === "boolean") scheduledScan.enabled = raw.scheduledScanEnabled;
+  } catch {
+    /* first boot or unreadable — keep default true */
+  }
+}
+
+function persistScheduledScanEnabled(outputDir: string): void {
+  try {
+    writeFileSync(panelSettingsPath(outputDir), JSON.stringify({ scheduledScanEnabled: scheduledScan.enabled }, null, 2), "utf8");
+  } catch (err) {
+    logger.debug({ err: String(err) }, "persistScheduledScanEnabled failed");
+  }
+}
+
 function isScanRunning(jobList: JobState[] = Array.from(jobs.values())): boolean {
   return jobList.some((j) => j.type === "scan" && j.status === "running");
 }
@@ -1318,10 +1344,12 @@ export function createWebServer(port: number): void {
   /** Enable/disable the scheduled scan cron (keeps the same 2h slots when re-enabled). */
   app.post("/api/scheduled-scan/enabled", (req: Request, res: Response) => {
     scheduledScan.enabled = req.body?.enabled !== false;
+    persistScheduledScanEnabled(config.output.dir);
     if (scheduledScan.enabled) {
       // Re-arm on the regular slot grid (06:00, 08:00, …) — no custom drift.
       scheduledScan.nextAt = getNextScheduledSlot().toISOString();
     }
+    logger.info({ enabled: scheduledScan.enabled, nextAt: scheduledScan.nextAt }, "scheduled scan toggled");
     emitEvent({
       type: "scheduled-scan-toggled",
       enabled: scheduledScan.enabled,
@@ -1696,8 +1724,9 @@ export function createWebServer(port: number): void {
   }
 
   function startScheduledScanCron(): void {
+    loadScheduledScanEnabled(config.output.dir);
     scheduledScan.nextAt = getNextScheduledSlot().toISOString();
-    logger.info({ nextAt: scheduledScan.nextAt }, "scheduled scan cron started");
+    logger.info({ nextAt: scheduledScan.nextAt, enabled: scheduledScan.enabled }, "scheduled scan cron started");
 
     setInterval(async () => {
       if (!scheduledScan.enabled) return;
