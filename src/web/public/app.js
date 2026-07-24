@@ -338,6 +338,10 @@ async function onScanSubmit(e) {
     document.getElementById("scan-form-msg").textContent = "Marka girin";
     return;
   }
+  // Keep the user's custom list for next time (defaults switch off).
+  if (!document.getElementById("scan-default-brands").checked) {
+    localStorage.setItem("detect-custom-brands", brands.join("\n"));
+  }
   const devices = document.getElementById("scan-devices").value;
   const expand = document.getElementById("scan-expand").checked;
   scanStartLockUntil = Date.now() + SCAN_START_LOCK_MS;
@@ -696,6 +700,25 @@ function init() {
   const savedView = localStorage.getItem(VIEW_KEY);
   if (savedView && document.getElementById("view-" + savedView)) switchView(savedView);
   document.getElementById("scan-form").addEventListener("submit", onScanSubmit);
+
+  // Default brands switch: ON → box pre-filled + locked; OFF → custom list
+  // (restores the user's last custom list if any).
+  const DEFAULT_SCAN_BRANDS = ["herabet", "primebahis", "napolibet", "rovbet", "vegasslot"];
+  const brandsBox = document.getElementById("scan-brands");
+  const defaultSwitch = document.getElementById("scan-default-brands");
+  function applyBrandMode() {
+    if (defaultSwitch.checked) {
+      brandsBox.value = DEFAULT_SCAN_BRANDS.join("\n");
+      brandsBox.disabled = true;
+    } else {
+      brandsBox.disabled = false;
+      const custom = localStorage.getItem("detect-custom-brands");
+      brandsBox.value = custom || "";
+      brandsBox.focus();
+    }
+  }
+  defaultSwitch.addEventListener("change", applyBrandMode);
+  applyBrandMode();
   document.getElementById("btn-clear-log")?.addEventListener("click", () => {
     logs = [];
     saveLogs();

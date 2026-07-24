@@ -1252,3 +1252,10 @@ tr.op-row:hover { background: var(--accent-soft); }
 }
 #tbl-op-results td:nth-child(2) { white-space: normal; max-width: 220px; } /* keyword */
 #tbl-op-results td.mono { max-width: 130px; }
+
+/* Locked (default-brands) textarea */
+#scan-brands:disabled {
+  opacity: 0.75;
+  border-style: dashed;
+  cursor: not-allowed;
+}
