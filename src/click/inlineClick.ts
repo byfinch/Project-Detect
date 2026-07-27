@@ -110,10 +110,12 @@ async function findAnchor(page: Page, ad: InlineAdTarget, newTab = false, useTou
         const playHref = playLink?.href ?? null;
         let link: Element | null = null;
         if (isApp) {
-          // App-install cards: the heading link often does NOT fire the
-          // aclk/intent chain — the conversion path is the Play/intent
-          // anchor (aclk-wrapped: adurl keeps "play.google.com" in the
-          // href) or the CTA button. Prefer those; heading is fallback.
+          // App-install cards: the REAL conversion anchor is the aclk one —
+          // its adurl= param is empty on live cards, so it does NOT contain
+          // "play.google.com" and the old playLink-first order missed it
+          // (live DOM dump + debug: aclk anchor fires the full chain,
+          // heading/CTA fires nothing). Priority: aclk → play/intent → CTA → heading.
+          const aclkLink = c.querySelector('a[href*="aclk"], a[href*="googleadservices"]') as HTMLAnchorElement | null;
           const CTA_RE = /yükle|hemen|install|indir|get/i;
           const CONTROL_RE = /menu|more|close|kapat|diğer|daha fazla|options|ayar/i;
           let cta: Element | null = null;
@@ -128,7 +130,7 @@ async function findAnchor(page: Page, ad: InlineAdTarget, newTab = false, useTou
               break;
             }
           }
-          link = playLink || cta || headingLink || c.querySelector("a[href]");
+          link = aclkLink || playLink || cta || headingLink || c.querySelector("a[href]");
         } else {
           link = headingLink || c.querySelector("a[href]");
         }
