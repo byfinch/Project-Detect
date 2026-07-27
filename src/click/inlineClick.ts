@@ -82,7 +82,7 @@ function uniqueByDomain(ads: InlineAdTarget[]): InlineAdTarget[] {
   return out;
 }
 
-async function findAnchor(page: Page, ad: InlineAdTarget, newTab = false) {
+async function findAnchor(page: Page, ad: InlineAdTarget, newTab = false, useTouch = false) {
   // Card-scoped first: find THIS ad's card and click its primary link —
   // title/aclk heuristics miss desktop cards ("anchor not found").
   // Play app cards all share play.google.com — for app ads match by title
@@ -152,6 +152,17 @@ async function findAnchor(page: Page, ad: InlineAdTarget, newTab = false) {
     return {
       playHref: box.playHref,
       click: async () => {
+        // Mobile SERP app cards answer TAP, not mouse events — Playwright
+        // mouse on a touch page fires no reliable aclk chain. No hover on
+        // mobile; tap alone, mouse fallback when touch is unsupported.
+        if (useTouch) {
+          try {
+            await page.touchscreen.tap(box.x, box.y);
+            return;
+          } catch {
+            /* touchscreen unsupported — mouse fallback below */
+          }
+        }
         await page.mouse.move(box.x, box.y, { steps: 8 });
         await page.mouse.down();
         await new Promise((r) => setTimeout(r, 80));
@@ -404,7 +415,7 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
       // tab so it can never kill the SERP tab (config.click.appClickInNewTab).
       const appNewTab = !!config.click.appClickInNewTab;
       let anchor = await Promise.race([
-        findAnchor(page, ad, appNewTab),
+        findAnchor(page, ad, appNewTab, device === "mobile"),
         sleep(15_000).then(() => null),
       ]);
       if (!anchor && !ad.adHref) {
@@ -668,7 +679,7 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
             sleep(6_000),
           ]);
           const retryAnchor = await Promise.race([
-            findAnchor(page, ad, appNewTab),
+            findAnchor(page, ad, appNewTab, device === "mobile"),
             sleep(15_000).then(() => null),
           ]);
           if (retryAnchor) {

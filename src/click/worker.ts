@@ -764,19 +764,35 @@ export async function clickAndReportAd(
       sleep(15_000).then(() => null),
     ]);
 
-    /** Mouse-click a located card; returns the landing page (new tab or same). */
+    /** Click a located card; returns the landing page (new tab or same). */
     const mouseClickCard = async (anchorPos: CardAnchor): Promise<Page> => {
       const pagesBefore = page.context().pages().length;
-      // Bounded: mouse ops hang forever on a frozen renderer.
-      await Promise.race([
-        (async () => {
-          await page.mouse.move(anchorPos.x, anchorPos.y, { steps: 8 }).catch(() => {});
-          await page.mouse.down().catch(() => {});
-          await sleep(60 + Math.random() * 80);
-          await page.mouse.up().catch(() => {});
-        })(),
-        sleep(10_000),
-      ]);
+      // Mobile SERP app cards answer TAP, not mouse events — Playwright mouse
+      // on a touch page fires no reliable aclk chain (live: ~50% silent
+      // no-chain clicks). No hover on mobile (meaningless); tap alone.
+      // Bounded: input ops hang forever on a frozen renderer.
+      if (device === "mobile") {
+        await Promise.race([
+          page.touchscreen.tap(anchorPos.x, anchorPos.y).catch(async () => {
+            // Touchscreen unsupported on this context → mouse fallback.
+            await page.mouse.move(anchorPos.x, anchorPos.y, { steps: 8 }).catch(() => {});
+            await page.mouse.down().catch(() => {});
+            await sleep(60 + Math.random() * 80);
+            await page.mouse.up().catch(() => {});
+          }),
+          sleep(10_000),
+        ]);
+      } else {
+        await Promise.race([
+          (async () => {
+            await page.mouse.move(anchorPos.x, anchorPos.y, { steps: 8 }).catch(() => {});
+            await page.mouse.down().catch(() => {});
+            await sleep(60 + Math.random() * 80);
+            await page.mouse.up().catch(() => {});
+          })(),
+          sleep(10_000),
+        ]);
+      }
       aclkFired = true;
       await sleep(1800);
       const pages = page.context().pages();
