@@ -66,6 +66,7 @@
     "maxClicksPerProfilePerHour": 3,
     "sameAdCooldownMinutes": 12,
     "appClickFirst": true,
+    "appClickInNewTab": true,
     "maxProfilesPerDevice": 20,
     "behavior": {
       "minPreClickMs": 5000,

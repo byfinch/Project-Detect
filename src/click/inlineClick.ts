@@ -82,14 +82,14 @@ function uniqueByDomain(ads: InlineAdTarget[]): InlineAdTarget[] {
   return out;
 }
 
-async function findAnchor(page: Page, ad: InlineAdTarget) {
+async function findAnchor(page: Page, ad: InlineAdTarget, newTab = false) {
   // Card-scoped first: find THIS ad's card and click its primary link —
   // title/aclk heuristics miss desktop cards ("anchor not found").
   // Play app cards all share play.google.com — for app ads match by title
   // only, and carry the card's Play href out for package-id extraction.
   const isApp = isAppInstallAd(ad.displayDomain, ad.adHref);
   const box = await page.evaluate(
-    ({ target, titleHint, isApp }) => {
+    ({ target, titleHint, isApp, newTab }) => {
       const norm = (s: string) => s.toLowerCase().replace(/^(www\.|m\.)/, "").trim();
       const cards = Array.from(
         document.querySelectorAll("[data-text-ad], #tads [data-hveid], #tadsb [data-hveid], #tvcap [data-hveid], [data-pcu]")
@@ -131,6 +131,9 @@ async function findAnchor(page: Page, ad: InlineAdTarget) {
           link = headingLink || c.querySelector("a[href]");
         }
         if (!link) return null;
+        // Isolation (app targets): fire the aclk→intent chain in a NEW tab
+        // so it can never kill/freeze the SERP tab.
+        if (newTab && isApp) link.setAttribute("target", "_blank");
         link.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
         const r = link.getBoundingClientRect();
         if (r.width === 0) return null;
@@ -142,6 +145,7 @@ async function findAnchor(page: Page, ad: InlineAdTarget) {
       target: (ad.finalDomain || ad.displayDomain || "").toLowerCase().replace(/^(www\.|m\.)/, ""),
       titleHint: (ad.title || "").slice(0, isApp ? 25 : 60),
       isApp,
+      newTab,
     }
   ).catch(() => null);
   if (box) {
@@ -396,8 +400,11 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
       // findAnchor runs page.evaluate with NO protocol timeout — on a renderer
       // frozen by an intent:// redirect (Play app ads on mobile) it hangs
       // forever (seen live: 3 wedges). Cap it; null falls to the aclk fallback.
+      // New-tab isolation (app targets): fire the aclk→intent chain in a new
+      // tab so it can never kill the SERP tab (config.click.appClickInNewTab).
+      const appNewTab = !!config.click.appClickInNewTab;
       let anchor = await Promise.race([
-        findAnchor(page, ad),
+        findAnchor(page, ad, appNewTab),
         sleep(15_000).then(() => null),
       ]);
       if (!anchor && !ad.adHref) {
@@ -610,7 +617,18 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
         // though Google DID register the click. The request listener is the
         // source of truth: an observed aclk request = click registered.
         const isAppAd = isAppInstallAd(ad.displayDomain, ad.adHref);
-        if (isAppAd && !landed && !aclkWatch?.sawClickProof() && ad.adHref && !ad.adHref.startsWith("intent://") && landing === page) {
+        // New-tab isolation (app targets): the aclk→intent chain fired in a
+        // NEW tab — the SERP tab is intact, so never treat the intent tab as
+        // the landing (it may die/freeze). The click is judged purely by the
+        // context-level request listener; Play evidence loads on the SERP tab.
+        let intentTab: Page | null = null;
+        if (isAppAd && appNewTab && landing !== page) {
+          intentTab = landing;
+          landing = page;
+          evidence.landingUrl = page.url();
+          landed = !onSerp(evidence.landingUrl);
+        }
+        if (isAppAd && !landed && !aclkWatch?.sawClickProof() && ad.adHref && !ad.adHref.startsWith("intent://") && landing === page && !intentTab) {
           // No click proof observed from the click — fire the parsed aclk
           // directly (that request IS the click); the listener catches it now.
           // intent:// hrefs are EXCLUDED: goto cannot fire them, and a
@@ -650,7 +668,7 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
             sleep(6_000),
           ]);
           const retryAnchor = await Promise.race([
-            findAnchor(page, ad),
+            findAnchor(page, ad, appNewTab),
             sleep(15_000).then(() => null),
           ]);
           if (retryAnchor) {
@@ -665,6 +683,12 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
               const pages = page.context().pages();
               if (pages.length > retryPagesBefore) landing = pages[pages.length - 1]!;
             }
+            if (isAppAd && appNewTab && landing !== page) {
+              // Retry fired the chain in another new tab — same isolation rules.
+              void intentTab?.close().catch(() => {});
+              intentTab = landing;
+              landing = page;
+            }
             await landing.waitForLoadState("domcontentloaded", { timeout: 20000 }).catch(() => {});
             evidence.landingUrl = landing.url();
             landed = !onSerp(evidence.landingUrl);
@@ -676,6 +700,11 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
           } else {
             logger.warn({ domain, profileId }, "inline app ad retry: card no longer on SERP (rotated)");
           }
+        }
+        if (intentTab) {
+          // Chain has run its course — close the intent tab; a frozen one
+          // rejects fast and is left for the profile close to reap.
+          await intentTab.close().catch(() => {});
         }
         const aclkSeen = aclkWatch?.sawClickProof() ?? false;
         // pkg from ad href, the card DOM, the landing URL, or the observed

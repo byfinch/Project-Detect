@@ -574,6 +574,11 @@ export async function clickAndReportAd(
   // the 1:1 gate only applies there (click-first failures are recorded
   // honestly as "after click-first" — the single allowed exception).
   const clickFirst = flow.reportEnabled && isAppAdTarget && !currentAd.isOrganic && !!ctx.config.click.appClickFirst;
+  // New-tab isolation (app targets): the aclk→intent chain kills/freezes the
+  // clicking tab ~50% of the time. Firing it in a NEW tab (target=_blank on
+  // the card anchor) keeps the SERP tab — and the impression/back-loop —
+  // intact; the context-level request listener still sees the aclk proof.
+  const clickInNewTab = isAppAdTarget && !!ctx.config.click.appClickInNewTab;
   const preEvidence: { finalUrl?: string | null; finalDomain?: string | null } = {};
 
   if (flow.reportEnabled) {
@@ -690,7 +695,7 @@ export async function clickAndReportAd(
     const locateCardAnchor = (): Promise<CardAnchor | null> =>
       Promise.race([
       page.evaluate(
-      ({ target, titleHint, isApp }) => {
+      ({ target, titleHint, isApp, newTab }) => {
         const norm = (s: string) => s.toLowerCase().replace(/^(www\.|m\.)/, "").trim();
         const cards = Array.from(
           document.querySelectorAll("[data-text-ad], #tads [data-hveid], #tadsb [data-hveid], #tvcap [data-hveid], [data-pcu]")
@@ -744,6 +749,9 @@ export async function clickAndReportAd(
             link = headingLink || c.querySelector("a[href]");
           }
           if (!link) return null;
+          // Isolation (app targets): fire the aclk→intent chain in a NEW tab
+          // so it can never kill/freeze the SERP tab (live: ~50% tab death).
+          if (newTab) link.setAttribute("target", "_blank");
           link.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
           const r = link.getBoundingClientRect();
           if (r.width === 0) return null;
@@ -751,7 +759,7 @@ export async function clickAndReportAd(
         }
         return null;
       },
-      { target: currentAd.displayDomain.toLowerCase().replace(/^(www\.|m\.)/, ""), titleHint: (currentAd.title ?? "").slice(0, isAppAdTarget ? 25 : 60), isApp: isAppAdTarget }
+      { target: currentAd.displayDomain.toLowerCase().replace(/^(www\.|m\.)/, ""), titleHint: (currentAd.title ?? "").slice(0, isAppAdTarget ? 25 : 60), isApp: isAppAdTarget, newTab: clickInNewTab }
       ).catch(() => null),
       sleep(15_000).then(() => null),
     ]);
@@ -822,6 +830,16 @@ export async function clickAndReportAd(
         landingPage = newPage ?? page;
       }
     }
+    // New-tab isolation (app targets): target=_blank fired the aclk→intent
+    // chain in a NEW tab — the SERP tab is intact, so never treat the intent
+    // tab as the landing (it may die/freeze on the intent hop). The click is
+    // judged purely by the context-level request listener; Play evidence
+    // loads on the SERP tab afterwards.
+    let intentTab: Page | null = null;
+    if (clickInNewTab && landingPage !== page) {
+      intentTab = landingPage;
+      landingPage = page;
+    }
     await landingPage.waitForLoadState("domcontentloaded", { timeout: 20000 }).catch(() => {});
     ev.landingUrl = landingPage.url();
 
@@ -838,7 +856,7 @@ export async function clickAndReportAd(
     // stays on the SERP even though Google DID register the click. The
     // request listener is the source of truth here: an observed aclk
     // request means the click IS registered (no SERP exit required).
-    if (isAppAdTarget && !landed && !aclkWatch?.sawClickProof() && currentAd.adHref && !currentAd.adHref.startsWith("intent://") && landingPage === page) {
+    if (isAppAdTarget && !landed && !aclkWatch?.sawClickProof() && currentAd.adHref && !currentAd.adHref.startsWith("intent://") && landingPage === page && !intentTab) {
       // No click proof observed from the mouse click — fire the parsed aclk
       // directly (that request IS the click); the listener catches it now.
       // intent:// hrefs are EXCLUDED here: goto cannot fire them, and a
@@ -869,6 +887,12 @@ export async function clickAndReportAd(
       const retryAnchor = await locateCardAnchor();
       if (retryAnchor) {
         landingPage = await mouseClickCard(retryAnchor);
+        if (clickInNewTab && landingPage !== page) {
+          // Retry fired the chain in another new tab — same isolation rules.
+          void intentTab?.close().catch(() => {});
+          intentTab = landingPage;
+          landingPage = page;
+        }
         cardAnchor = retryAnchor; // pkg extraction below prefers the fresh card
         await landingPage.waitForLoadState("domcontentloaded", { timeout: 20000 }).catch(() => {});
         ev.landingUrl = landingPage.url();
@@ -881,6 +905,12 @@ export async function clickAndReportAd(
       } else {
         logger.warn({ jobId: jobForRecord.id, domain: currentAd.displayDomain }, "app ad retry: card no longer on SERP (rotated)");
       }
+    }
+    if (intentTab) {
+      // The chain has run its course (1800ms settle + proof polls above) —
+      // close the intent tab; a frozen one rejects fast and is left for the
+      // profile close to reap.
+      await intentTab.close().catch(() => {});
     }
     const aclkSeen = aclkWatch?.sawClickProof() ?? false;
     // pkg from the ad href, the card DOM, the landing URL, or the observed

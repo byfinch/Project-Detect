@@ -136,6 +136,12 @@ const ConfigSchema = z.object({
      * targets keep report-first regardless. Default true.
      */
     appClickFirst: z.boolean().default(true),
+    /**
+     * App-install ad isolation: set target=_blank on the card anchor before
+     * the click so the aclk→intent chain fires in a NEW tab and can never
+     * kill/freeze the SERP tab (live: ~50% tab death). Default true.
+     */
+    appClickInNewTab: z.boolean().default(true),
     behavior: z.object({
       minPreClickMs: z.number().int().nonnegative(),
       maxPreClickMs: z.number().int().nonnegative(),
@@ -326,6 +332,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       maxProfilesPerDevice: file.click?.maxProfilesPerDevice ?? 5,
       focusWindowMinutes: file.click?.focusWindowMinutes ?? 120,
       appClickFirst: file.click?.appClickFirst ?? true,
+      appClickInNewTab: file.click?.appClickInNewTab ?? true,
       behavior: {
         minPreClickMs: file.click?.behavior?.minPreClickMs ?? 5000,
         maxPreClickMs: file.click?.behavior?.maxPreClickMs ?? 15000,
