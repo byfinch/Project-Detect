@@ -104,10 +104,33 @@ async function findAnchor(page: Page, ad: InlineAdTarget) {
              cardText.includes(target));
         if (!isTarget) continue;
         const headingLink = heading?.closest("a") as HTMLAnchorElement | null;
-        const link = (headingLink || c.querySelector("a[href]")) as HTMLAnchorElement | null;
-        if (!link) return null;
         const playLink = c.querySelector('a[href*="play.google.com"], a[href^="intent://"]') as HTMLAnchorElement | null;
         const playHref = playLink?.href ?? null;
+        let link: Element | null = null;
+        if (isApp) {
+          // App-install cards: the heading link often does NOT fire the
+          // aclk/intent chain — the conversion path is the Play/intent
+          // anchor (aclk-wrapped: adurl keeps "play.google.com" in the
+          // href) or the CTA button. Prefer those; heading is fallback.
+          const CTA_RE = /yükle|hemen|install|indir|get/i;
+          const CONTROL_RE = /menu|more|close|kapat|diğer|daha fazla|options|ayar/i;
+          let cta: Element | null = null;
+          for (const el of Array.from(c.querySelectorAll('[role="button"], button, a[href]'))) {
+            const label = `${el.getAttribute("aria-label") || ""} ${String((el as HTMLElement).className || "")}`;
+            if (CONTROL_RE.test(label)) continue; // 3-dot menu / close controls
+            const text = (el.textContent || "").trim();
+            if (!text || text.length > 30 || !CTA_RE.test(text)) continue;
+            const rr = el.getBoundingClientRect();
+            if (rr.width > 0) {
+              cta = el;
+              break;
+            }
+          }
+          link = playLink || cta || headingLink || c.querySelector("a[href]");
+        } else {
+          link = headingLink || c.querySelector("a[href]");
+        }
+        if (!link) return null;
         link.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
         const r = link.getBoundingClientRect();
         if (r.width === 0) return null;
