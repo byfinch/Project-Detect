@@ -14,6 +14,8 @@ import { ClickStore } from "./store.js";
 import type { ClickEvidence, ClickJob, ClickReportResult, ClickResult, ClickStatus } from "./types.js";
 import { openReportUi, fillReportForm } from "../report/autoSerpReport.js";
 import { appAdPackage, isAppInstallAd } from "../util/appAds.js";
+import { watchAclkRequests, type AclkWatch } from "./aclkWatch.js";
+import { restoreSerp } from "./serpRestore.js";
 
 export interface InlineAdTarget {
   title: string;
@@ -301,10 +303,26 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
     const capturedAt = new Date().toISOString();
     let reportResult: ClickReportResult = { status: "skipped", message: "report disabled for inline click" };
 
+    // App ads only: an observed aclk request proves the click reached
+    // Google even when the intent:// chain never leaves the SERP (the old
+    // "no navigation" false-fails). Attached LAZILY at the click points —
+    // the pre-click resolve also navigates the aclk URL in this context and
+    // must NOT trip the watcher. Detached in the finally below.
+    // (Holder object: a plain `let` mutated via closure gets dead-narrowed by TS.)
+    const aclkWatchRef: { w: AclkWatch | null } = { w: null };
+    const ensureAclkWatch = (): AclkWatch | null => {
+      if (!aclkWatchRef.w && isAppInstallAd(ad.displayDomain, ad.adHref)) {
+        aclkWatchRef.w = watchAclkRequests(page);
+      }
+      return aclkWatchRef.w;
+    };
+
     try {
-      // Ensure we're back on SERP (previous landing may have navigated main page)
+      // Ensure we're back on SERP (previous landing may have navigated main
+      // page). goBack first: bfcache restores the same impression, a fresh
+      // goto re-runs the auction and rotates the cards.
       if (!page.url().includes("google.") || page.url().includes("/sorry")) {
-        await page.goto(serpUrl, { waitUntil: "domcontentloaded", timeout: 25000 }).catch(() => {});
+        await restoreSerp(page, serpUrl);
         await sleep(800);
       }
 
@@ -367,16 +385,31 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
         // Report is already out; anchor gone after the report flow (SERP rotated
         // or report navigated the page) — fire the parsed aclk directly.
         logger.warn({ domain, profileId }, "inline: anchor gone after report — direct aclk goto fallback");
+        const aclkWatch = ensureAclkWatch();
         await page.goto(ad.adHref, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
         evidence.landingUrl = page.url();
-        // Honest outcome: aclk goto that never leaves the SERP is NOT a click.
-        if (page.url() === serpUrl || /\/search[?#]/.test(page.url())) {
+        const stuckOnSerp = page.url() === serpUrl || /\/search[?#]/.test(page.url());
+        // App ads: the intent:// chain cannot navigate a desktop browser, but
+        // an observed aclk request means Google DID register the click.
+        const aclkSeen = aclkWatch?.sawAclk() ?? false;
+        // Honest outcome: aclk goto that never leaves the SERP and never
+        // fired an aclk request is NOT a click.
+        if (stuckOnSerp && !aclkSeen) {
           status = "failed";
           error = "direct aclk goto did not navigate (anchor gone)";
           failed++;
         } else {
           status = "success";
           completed++;
+          if (stuckOnSerp) {
+            // aclk seen but page on SERP — take the HTTPS Play page for evidence.
+            const pkg = appAdPackage(ad.adHref) ?? (aclkWatch?.packageId() ?? null);
+            if (pkg) {
+              const playUrl = `https://play.google.com/store/apps/details?id=${pkg}&hl=tr&gl=tr`;
+              await page.goto(playUrl, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
+              evidence.landingUrl = page.url();
+            }
+          }
           try {
             evidence.finalUrl = evidence.finalUrl || page.url();
             evidence.finalDomain = evidence.finalDomain || new URL(page.url()).hostname.replace(/^www\./, "");
@@ -503,14 +536,16 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
             })(),
             sleep(6_000),
           ]);
-          // The report flow may have navigated — restore SERP before clicking.
+          // The report flow may have navigated — restore SERP before clicking
+          // (goBack first: same impression from bfcache, no auction re-run).
           if (!page.url().includes("google.") || page.url().includes("/sorry")) {
-            await page.goto(serpUrl, { waitUntil: "domcontentloaded", timeout: 25000 }).catch(() => {});
+            await restoreSerp(page, serpUrl);
             await sleep(800);
           }
         }
 
         // 2) The click itself (report is already out).
+        const aclkWatch = ensureAclkWatch();
         const pagesBefore = page.context().pages().length;
         const [newPage] = await Promise.all([
           page.context().waitForEvent("page", { timeout: 18000 }).catch(() => null),
@@ -542,10 +577,22 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
 
         // Play app ads: the aclk chain ends at intent://play.google.com — a
         // browser cannot open it, so the page usually stays on the SERP even
-        // though Google DID register the click. Take the HTTPS Play page for
-        // evidence/stay; pkg from ad href, the card DOM, or the landing URL.
+        // though Google DID register the click. The request listener is the
+        // source of truth: an observed aclk request = click registered.
+        const isAppAd = isAppInstallAd(ad.displayDomain, ad.adHref);
+        if (isAppAd && !landed && !aclkWatch?.sawAclk() && ad.adHref && landing === page) {
+          // No aclk observed from the click — fire the parsed aclk directly
+          // (that request IS the click); the listener catches it now.
+          logger.warn({ domain, profileId }, "inline app ad: no aclk observed — direct aclk goto fallback");
+          await page.goto(ad.adHref, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
+          evidence.landingUrl = page.url();
+          landed = !onSerp(evidence.landingUrl);
+        }
+        const aclkSeen = aclkWatch?.sawAclk() ?? false;
+        // pkg from ad href, the card DOM, the landing URL, or the observed
+        // intent://play.google.com redirect.
         let pkg: string | null = null;
-        if (isAppInstallAd(ad.displayDomain, ad.adHref)) {
+        if (isAppAd) {
           let cardPlayHref: string | null = null;
           if (anchor && "playHref" in anchor) {
             cardPlayHref = anchor.playHref ?? null;
@@ -556,16 +603,18 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
               return (pl as HTMLAnchorElement | null)?.href ?? null;
             }).catch(() => null);
           }
-          pkg = appAdPackage(ad.adHref) ?? appAdPackage(cardPlayHref) ?? appAdPackage(evidence.landingUrl);
+          pkg = appAdPackage(ad.adHref) ?? appAdPackage(cardPlayHref) ?? appAdPackage(evidence.landingUrl) ?? (aclkWatch?.packageId() ?? null);
         }
-        if (pkg && !landed) {
-          const playUrl = `https://play.google.com/store/apps/details?id=${pkg}&hl=tr&gl=tr`;
-          logger.info({ domain, pkg }, "inline app ad: intent/stuck landing — HTTPS Play page for evidence");
-          await landing.goto(playUrl, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
-          evidence.landingUrl = landing.url();
-          // The real landing is the APP itself — no browser can render it; the
-          // aclk was followed, so the click counts even if Play fails to load.
+        if (isAppAd && !landed && aclkSeen) {
+          // aclk reached Google — count the click even though the intent
+          // chain never left the SERP. HTTPS Play page for evidence/stay.
           landed = true;
+          if (pkg) {
+            const playUrl = `https://play.google.com/store/apps/details?id=${pkg}&hl=tr&gl=tr`;
+            logger.info({ domain, pkg }, "inline app ad: aclk observed on SERP — HTTPS Play page for evidence");
+            await landing.goto(playUrl, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
+            evidence.landingUrl = landing.url();
+          }
         }
         if (!landed) {
           status = "failed";
@@ -614,11 +663,12 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
           }
         }
 
-        // Close landing tab if separate; restore SERP on main page
+        // Close landing tab if separate; restore SERP on main page (goBack
+        // first — bfcache keeps the same impression, goto re-runs the auction).
         if (landing !== page) {
           await landing.close().catch(() => {});
         } else {
-          await page.goto(serpUrl, { waitUntil: "domcontentloaded", timeout: 25000 }).catch(() => {});
+          await restoreSerp(page, serpUrl);
           await sleep(600);
         }
 
@@ -631,6 +681,8 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
       error = String(err);
       failed++;
       logger.warn({ domain, profileId, err: error }, "inline SERP click failed");
+    } finally {
+      aclkWatchRef.w?.detach();
     }
 
     if (reportResult.status === "submitted" || reportResult.status === "filled") {

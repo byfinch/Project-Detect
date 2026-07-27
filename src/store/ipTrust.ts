@@ -52,15 +52,17 @@ export interface SolverFailResult {
 
 /**
  * Progressive cooldown after solver fails (not permanent ban).
- * 1st: 10m · 2nd: 20m · 3rd: 45m · 4th: 2h · 5th: 6h · 6th+: 12h (cap 24h)
+ * 1st: 10m · 2nd: 20m · 3rd: 30m · 4th+: 45m (hard cap 45m)
+ * No 1h/24h parking: the system works in solve-and-move-on mode, so a
+ * cooling profile must come back quickly.
  */
 export function computeNextRetryAt(consecutiveFails: number, from = new Date()): Date {
-  const minutes = [10, 20, 45, 120, 360, 720, 1440][Math.min(Math.max(consecutiveFails, 1) - 1, 6)] ?? 1440;
+  const minutes = [10, 20, 30, 45, 45, 45, 45][Math.min(Math.max(consecutiveFails, 1) - 1, 6)] ?? 45;
   return new Date(from.getTime() + minutes * 60_000);
 }
 
 export function cooldownMinutesForFails(consecutiveFails: number): number {
-  return [10, 20, 45, 120, 360, 720, 1440][Math.min(Math.max(consecutiveFails, 1) - 1, 6)] ?? 1440;
+  return [10, 20, 30, 45, 45, 45, 45][Math.min(Math.max(consecutiveFails, 1) - 1, 6)] ?? 45;
 }
 
 /** True if vault says wait until next_retry_at. */

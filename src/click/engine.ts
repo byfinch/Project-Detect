@@ -406,6 +406,13 @@ async function runDeviceClickEngine(
   let adFreeWarned = false;
 
   /**
+   * Per-profile AdsPower open failures in this run. 3+ = thundering-herd
+   * victim (the same profiles open fine manually) — the JOB gets one last
+   * chance at the end of the queue instead of dying as profile_error.
+   */
+  const openFailCounts = new Map<string, number>();
+
+  /**
    * Tail watchdog: when the queue is drained and only stragglers remain, the
    * freed slots have no work left — one wedged tail job holds the whole wave
    * (and the campaign's next wave) hostage. Healthy jobs run ~30-90s, so any
@@ -589,12 +596,39 @@ async function runDeviceClickEngine(
         consecutiveNotFoundSkips = 0;
       }
 
+      // Last-chance requeue: a profile that failed to OPEN 3+ times in this
+      // run is a thundering-herd victim (the same profiles open fine
+      // manually) — give the SAME job one more shot at the END of the queue
+      // instead of burning it as profile_error. Fails again → normal path.
+      let lastChanceQueued = false;
+      if (result.status === "profile_error") {
+        const fails = (openFailCounts.get(job.profileId) ?? 0) + 1;
+        openFailCounts.set(job.profileId, fails);
+        if (fails >= 3 && !job.lastChanceRetry) {
+          const g0 = globalDone();
+          const inFlight0 = pending.length + runningProfiles.size - 1;
+          if (g0.done + inFlight0 < lockedTotal) {
+            pending.push({
+              ...job,
+              id: makeJobId(job.profileId, pending.length + results.length),
+              lastChanceRetry: true,
+              scheduledAt: Date.now() + Math.floor(randomBetween(3_000, 9_000)),
+            });
+            lastChanceQueued = true;
+            logger.info(
+              { profileId: job.profileId, openFails: fails, domain: job.targetDomain },
+              "profile open failed 3+ times — same job requeued at queue end (last chance)"
+            );
+          }
+        }
+      }
+
       // Retry on OTHER profile only — does NOT increase locked total (swap remaining work).
       const retriable =
         (result.status === "skipped" && /not found/i.test(result.error || "")) ||
         result.status === "captcha" ||
         result.status === "profile_error";
-      if (retriable && job.attempt + 1 < (job.maxAttempts || 2)) {
+      if (retriable && !lastChanceQueued && job.attempt + 1 < (job.maxAttempts || 2)) {
         const g = globalDone();
         // Budget check: pending + in-flight (minus THIS job, still counted in both)
         const inFlight = pending.length + runningProfiles.size - 1;

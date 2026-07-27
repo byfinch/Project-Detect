@@ -26,6 +26,12 @@ export interface ClickJob {
   scheduledAt: number;
   attempt: number;
   maxAttempts: number;
+  /**
+   * One-time "last chance" requeue of the SAME job after its profile hit 3+
+   * AdsPower open failures in this run (thundering-herd victim, not a bad
+   * profile). Prevents infinite requeue loops.
+   */
+  lastChanceRetry?: boolean;
 }
 
 /** Evidence that an ad was seen by a specific profile for a specific keyword. */

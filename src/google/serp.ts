@@ -1208,7 +1208,16 @@ export interface WarmUpOptions extends SerpNavOptions {
   trendWarmup?: boolean;
 }
 
-export type WarmUpResult = SerpNavResult & { trend?: string; method: "trend" | "home-only" | "skipped" };
+export type WarmUpResult = SerpNavResult & {
+  trend?: string;
+  method: "trend" | "home-only" | "skipped";
+  /**
+   * True when warm-up THREW (page crash, navigation/network timeout, CDP) —
+   * an infrastructure error, NOT a solver defeat. Callers must not count it
+   * against the profile's solver cooldown ladder.
+   */
+  infraError?: boolean;
+};
 
 export async function warmUp(
   session: BrowserSession,
@@ -1271,6 +1280,8 @@ export async function warmUp(
         finalUrl: session.page.url(),
         trend: "",
         method: "trend",
+        // Thrown = crash/timeout/CDP, not a solver defeat (infraError).
+        infraError: true,
       };
     }
   }
@@ -1291,7 +1302,7 @@ export async function warmUp(
     return { ...nav, method: "home-only", trend: soft };
   } catch (err) {
     logger.debug({ err: String(err) }, "soft warm-up failed");
-    return { captcha: true, captchaSolved: false, finalUrl: session.page.url(), method: "home-only" };
+    return { captcha: true, captchaSolved: false, finalUrl: session.page.url(), method: "home-only", infraError: true };
   }
 }
 
