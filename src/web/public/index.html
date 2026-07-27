@@ -169,6 +169,32 @@
                 <span class="btn-icon">■</span> Durdur
               </button>
             </div>
+            <div class="op-card">
+              <div class="op-header">
+                <div class="op-icon">⛈</div>
+                <div class="op-status" id="storm-status-badge">PASİF</div>
+              </div>
+              <h3>Storm Modu</h3>
+              <p class="op-desc">Kalıcı oturum havuzu — reklamı gören profiller kapanmadan aynı SERP'te tekrarlı tık + rapor üretir.</p>
+              <div class="op-meta" id="storm-status">Beklemede</div>
+              <div class="storm-form" id="storm-form">
+                <input type="text" id="storm-keywords" placeholder="keyword seti · virgülle (örn. herabet, herabet giriş)" />
+                <input type="text" id="storm-domain" placeholder="hedef domain (örn. herabet.com)" />
+                <select id="storm-device">
+                  <option value="mobile">Mobil</option>
+                  <option value="desktop">Masaüstü</option>
+                </select>
+              </div>
+              <div class="storm-actions">
+                <button id="btn-start-storm" class="btn btn-primary">
+                  <span class="btn-icon">▶</span> Başlat
+                </button>
+                <button id="btn-stop-storm" class="btn btn-danger" disabled>
+                  <span class="btn-icon">■</span> Durdur
+                </button>
+              </div>
+              <div id="storm-form-msg" class="form-msg"></div>
+            </div>
           </div>
         </div>
       </section>

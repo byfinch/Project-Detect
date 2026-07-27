@@ -778,6 +778,29 @@ textarea { resize: vertical; line-height: 1.5; }
 
 .op-actions { display: flex; gap: 10px; }
 
+/* Storm card */
+.storm-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.storm-form.disabled { opacity: 0.45; pointer-events: none; }
+.storm-form input,
+.storm-form select {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 8px 11px;
+  outline: none;
+}
+.storm-form input:focus,
+.storm-form select:focus { border-color: var(--border-strong); }
+.storm-actions { display: flex; gap: 10px; }
+
 /* Jobs */
 .jobs-list {
   display: flex;

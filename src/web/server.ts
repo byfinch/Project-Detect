@@ -9,6 +9,7 @@ import { Store } from "../store/db.js";
 import { ClickStore } from "../click/store.js";
 import { runScan } from "../scanner.js";
 import { runFocusCampaign, pickTopAdFromScan, waveBudget, type FocusCampaignState } from "../click/focusCampaign.js";
+import { StormManager } from "../click/storm.js";
 import { analyzeScanClones } from "../analyze/cloneReport.js";
 import { expandBrandKeywords } from "../util/keywords.js";
 import { buildAdComplaintPack } from "../report/adComplaintPack.js";
@@ -27,7 +28,7 @@ const PUBLIC_DIR = existsSync(resolve(__dirname, "public"))
 
 interface JobState {
   id: string;
-  type: "scan" | "click";
+  type: "scan" | "click" | "storm";
   status: "running" | "completed" | "failed" | "cancelled";
   progress: number;
   message: string;
@@ -45,6 +46,9 @@ const cancelFlags = new Map<string, boolean>();
 const scanAbortControllers = new Map<string, AbortController>();
 /** Active focus campaign (top-ad · 2h windows). */
 let activeCampaign: FocusCampaignState | null = null;
+/** Active storm pool (persistent sessions) — at most one at a time. */
+let activeStorm: StormManager | null = null;
+let activeStormJobId: string | null = null;
 const events = new EventEmitter();
 events.setMaxListeners(100);
 
@@ -2036,6 +2040,162 @@ export function createWebServer(port: number): void {
     res.json({ ok: true, campaignId: id, message: "durdurma istendi" });
   });
 
+  /**
+   * Storm mode: persistent session pool re-clicking an ad on kept-open SERPs.
+   * Manual start here; the module is handoff-ready for future auto-takeover.
+   */
+  app.post("/api/storm/start", async (req: Request, res: Response) => {
+    try {
+      if (activeStorm && activeStorm.status().running) {
+        res.status(400).json({ error: "Storm zaten çalışıyor — önce durdurun" });
+        return;
+      }
+      const body = req.body ?? {};
+      const keywords: string[] = Array.isArray(body.keywords)
+        ? body.keywords.map((k: unknown) => String(k).trim()).filter(Boolean)
+        : String(body.keywords ?? body.keyword ?? "")
+            .split(/[,\n]/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+      const targetDomain = String(body.targetDomain ?? "").trim();
+      const device = body.device === "desktop" ? "desktop" : "mobile";
+      const targetTitle = body.targetTitle ? String(body.targetTitle) : undefined;
+      const maxSessions = Number(body.maxSessions) > 0 ? Math.floor(Number(body.maxSessions)) : undefined;
+      if (keywords.length === 0 || !targetDomain) {
+        res.status(400).json({ error: "keywords + targetDomain gerekli" });
+        return;
+      }
+      const cfg = loadConfig();
+      const jobId = createJobId("storm");
+      const nowIso = new Date().toISOString();
+      jobs.set(jobId, {
+        id: jobId,
+        type: "storm",
+        status: "running",
+        progress: 1,
+        message: `storm · ${targetDomain} · ${device} · havuz açılıyor`,
+        details: { targetDomain, device, keywords, runId: 0, sessions: 0, completed: 0, reports: 0 },
+        startedAt: nowIso,
+        updatedAt: nowIso,
+      });
+      persistJobs(cfg.output.dir);
+
+      const manager = new StormManager({
+        config: cfg,
+        outputDir: cfg.output.dir,
+        keywords,
+        targetDomain,
+        targetTitle,
+        device,
+        maxSessions,
+        operationId: jobId,
+        onEvent: (ev) => {
+          emitEvent({ ...ev, jobId });
+          if (ev.type === "storm-click" || ev.type === "storm-progress") {
+            const st = manager.status();
+            setJobState(jobId, {
+              progress: 50, // open-ended pool — activity lives in the counters
+              message: String(ev.message ?? "storm"),
+              details: {
+                ...(jobs.get(jobId)?.details ?? {}),
+                runId: manager.runId,
+                sessions: st.activeSessions,
+                completed: st.totals.clicks,
+                reports: st.totals.reports,
+                failed: st.totals.failed,
+                skipped: st.totals.skipped,
+                clicksPerHour: st.clicksPerHour,
+              },
+            });
+          }
+        },
+        // Campaign priority: an active scan/click campaign shrinks storm to 0
+        // sessions until it finishes (storm resumes afterwards).
+        shouldYield: () => {
+          if (activeCampaign?.status === "running") return true;
+          return Array.from(jobs.values()).some(
+            (j) => j.status === "running" && (j.type === "click" || j.type === "scan")
+          );
+        },
+      });
+      activeStorm = manager;
+      activeStormJobId = jobId;
+      const { runId } = await manager.start();
+      setJobState(jobId, {
+        message: `storm · ${targetDomain} · ${device} · run #${runId}`,
+        details: { ...(jobs.get(jobId)?.details ?? {}), runId },
+      });
+      emitEvent({
+        type: "storm-started",
+        jobId,
+        domain: targetDomain,
+        device,
+        message: `storm başladı · ${targetDomain} · ${device} · ${keywords.length} keyword`,
+      });
+      // Finalize the panel job when the pool fully drains (stop or crash).
+      void manager.whenDone().then(() => {
+        const st = manager.status();
+        setJobState(jobId, {
+          status: jobs.get(jobId)?.status === "cancelled" ? "cancelled" : "completed",
+          progress: 100,
+          message: `storm bitti · ${st.totals.clicks} tık · ${st.totals.reports} rapor`,
+          finishedAt: new Date().toISOString(),
+          details: {
+            ...(jobs.get(jobId)?.details ?? {}),
+            sessions: 0,
+            completed: st.totals.clicks,
+            reports: st.totals.reports,
+            failed: st.totals.failed,
+            skipped: st.totals.skipped,
+          },
+        });
+        emitEvent({
+          type: "storm-completed",
+          jobId,
+          clicks: st.totals.clicks,
+          reports: st.totals.reports,
+          message: `storm tamamlandı · ${st.totals.clicks} tık · ${st.totals.reports} rapor`,
+        });
+        if (activeStorm === manager) {
+          activeStorm = null;
+          activeStormJobId = null;
+        }
+      });
+      res.json({ ok: true, jobId, runId, status: "started" });
+    } catch (err) {
+      const msg = String(err);
+      if (activeStormJobId) {
+        setJobState(activeStormJobId, { status: "failed", message: msg, error: msg, finishedAt: new Date().toISOString() });
+        activeStorm = null;
+        activeStormJobId = null;
+      }
+      res.status(400).json({ error: msg });
+    }
+  });
+
+  /** Graceful stop: ≤10s — sessions close their browsers, stragglers force-killed. */
+  app.post("/api/storm/stop", async (_req: Request, res: Response) => {
+    if (!activeStorm) {
+      res.json({ ok: true, message: "aktif storm yok" });
+      return;
+    }
+    const mgr = activeStorm;
+    const jid = activeStormJobId;
+    if (jid) {
+      setJobState(jid, { message: "storm durduruluyor — oturumlar kapanıyor (≤10sn)" });
+    }
+    emitEvent({ type: "storm-stopping", jobId: jid, message: "storm durduruluyor — oturumlar kapanıyor" });
+    await mgr.stop();
+    res.json({ ok: true, message: "storm durduruldu" });
+  });
+
+  app.get("/api/storm/status", (_req: Request, res: Response) => {
+    res.json({
+      jobId: activeStormJobId,
+      storm: activeStorm ? activeStorm.status() : { running: false },
+    });
+  });
+
   /** Cancel a running panel job (marks cancelled; engine finishes current browsers then exits naturally). */
   app.post("/api/jobs/:id/cancel", (req: Request, res: Response) => {
     const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -2053,6 +2213,10 @@ export function createWebServer(port: number): void {
     // Scans stop via AbortController, not the flag — otherwise cancel is a no-op.
     scanAbortControllers.get(jobId)?.abort(new Error("cancelled from panel"));
     scanAbortControllers.delete(jobId);
+    // Storm pools stop via their manager (graceful ≤10s session shutdown).
+    if (state.type === "storm" && activeStorm) {
+      void activeStorm.stop().catch(() => {});
+    }
     setJobState(jobId, {
       status: "cancelled",
       message: "İptal istendi — aktif tarayıcılar kapanınca durur",

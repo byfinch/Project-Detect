@@ -79,6 +79,20 @@
       "mobileViewport": { "width": 393, "height": 851 }
     }
   },
+  "storm": {
+    "maxSessions": 12,
+    "clicksPerImpression": 2,
+    "reportEveryNClicks": 3,
+    "refreshIntervalSec": 65,
+    "missRetrySec": 150,
+    "maxMisses": 5,
+    "keywordRotateEvery": 3,
+    "maxSolverFails": 3,
+    "stayMinMs": 8000,
+    "stayMaxMs": 20000,
+    "preClickMinMs": 3000,
+    "preClickMaxMs": 8000
+  },
   "output": {
     "sqlite": true,
     "json": true,

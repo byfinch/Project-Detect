@@ -258,6 +258,84 @@ function updateOps(ops) {
 let refreshInFlight = false;
 let lastRefreshAt = 0;
 
+let stormStopping = false;
+
+function updateStorm(storm) {
+  const badge = document.getElementById("storm-status-badge");
+  const meta = document.getElementById("storm-status");
+  const startBtn = document.getElementById("btn-start-storm");
+  const stopBtn = document.getElementById("btn-stop-storm");
+  const form = document.getElementById("storm-form");
+  if (!badge || !meta) return;
+  if (storm?.running) {
+    const t = storm.totals || { clicks: 0, reports: 0 };
+    badge.textContent = "AKTİF";
+    badge.className = "op-status run";
+    meta.textContent = `${storm.targetDomain || "—"} · ${storm.activeSessions ?? 0} oturum · ${t.clicks} tık · ${t.reports} rapor · saatlik ${storm.clicksPerHour ?? 0}`;
+    if (startBtn) startBtn.disabled = true;
+    if (stopBtn) {
+      stopBtn.disabled = stormStopping;
+      if (!stormStopping) stopBtn.innerHTML = `<span class="btn-icon">■</span> Durdur`;
+    }
+    if (form) form.classList.add("disabled");
+  } else {
+    badge.textContent = "PASİF";
+    badge.className = "op-status";
+    meta.textContent = storm?.totals && (storm.totals.clicks || storm.totals.reports)
+      ? `Son: ${storm.targetDomain} · ${storm.totals.clicks} tık · ${storm.totals.reports} rapor`
+      : "Beklemede";
+    if (startBtn) startBtn.disabled = false;
+    if (stopBtn) {
+      stopBtn.disabled = true;
+      if (stormStopping) {
+        stormStopping = false;
+        stopBtn.innerHTML = `<span class="btn-icon">■</span> Durdur`;
+      }
+    }
+    if (form) form.classList.remove("disabled");
+  }
+}
+
+async function startStorm() {
+  const msg = document.getElementById("storm-form-msg");
+  const keywords = document.getElementById("storm-keywords").value.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+  const targetDomain = document.getElementById("storm-domain").value.trim();
+  const device = document.getElementById("storm-device").value;
+  if (!keywords.length || !targetDomain) {
+    if (msg) msg.textContent = "keyword seti + hedef domain gerekli";
+    return;
+  }
+  if (msg) msg.textContent = "Başlatılıyor…";
+  try {
+    const res = await API.post("/api/storm/start", { keywords, targetDomain, device });
+    if (msg) msg.textContent = `Başladı · run #${res.runId}`;
+    log("info", `storm başladı · ${targetDomain} · ${device} · ${keywords.length} keyword`);
+    await refresh(true);
+  } catch (err) {
+    if (msg) msg.textContent = err.message;
+    log("err", `storm başlatma: ${err.message}`);
+  }
+}
+
+async function stopStorm() {
+  if (stormStopping) return; // no spam — one stop request at a time
+  stormStopping = true;
+  const btn = document.getElementById("btn-stop-storm");
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `Durduruluyor`;
+  }
+  try {
+    await API.post("/api/storm/stop", {});
+    log("warn", "storm durduruldu");
+    await refresh(true);
+  } catch (err) {
+    log("err", `storm durdurma: ${err.message}`);
+    stormStopping = false;
+    if (btn) btn.innerHTML = `<span class="btn-icon">■</span> Durdur`;
+  }
+}
+
 async function refresh(force = false) {
   if (refreshInFlight) return; // pager double-click guard — no parallel fetches
   // Throttle event-driven refreshes (SSE click-done storms); explicit UI
@@ -269,13 +347,14 @@ async function refresh(force = false) {
   document.querySelectorAll(".pager-btn").forEach((b) => b.classList.add("loading"));
   try {
     const proofQs = proofFilterQs();
-    const [ops, complaintRes, opResultsRes, scansRes, proofRes, healthRes] = await Promise.all([
+    const [ops, complaintRes, opResultsRes, scansRes, proofRes, healthRes, stormRes] = await Promise.all([
       API.get("/api/ops"),
       API.get("/api/reports/complaints/packs").catch(() => ({ packs: [] })),
       API.get(`/api/ops/summary?page=${opResultsPage}&limit=${OP_RESULTS_LIMIT}`).catch(() => ({ results: [], total: 0, page: 1, limit: OP_RESULTS_LIMIT })),
       API.get(`/api/scans/paged?page=${scansPage}&limit=${SCANS_PER_PAGE}`).catch(() => ({ scans: [], total: 0, page: 1, limit: SCANS_PER_PAGE })),
       API.get(`/api/reports/submitted?page=${proofPage}&limit=${PROOF_LIMIT}${proofQs}`).catch(() => ({ results: [], total: 0, page: 1, limit: PROOF_LIMIT })),
       API.get("/api/profiles/health").catch(() => ({ profiles: [] })),
+      API.get("/api/storm/status").catch(() => ({ storm: { running: false } })),
     ]);
     const adsPill = document.getElementById("pill-ads");
     if (adsPill) {
@@ -302,6 +381,7 @@ async function refresh(force = false) {
     }
     isScanRunningFromOps = isScanRunning(ops.jobs);
     updateOps(ops);
+    updateStorm(stormRes?.storm);
     updateScheduledInfo(ops.scheduledScan);
     renderJobs(ops.jobs);
     renderScans(scansRes);
@@ -389,7 +469,7 @@ function setupSSE() {
     try {
       const d = JSON.parse(e.data);
       if (d.message) log(eventLevel(d.type), d.message);
-      if (["scan-completed", "scan-started", "click-completed", "click-done", "campaign-rescan-done"].includes(d.type)) {
+      if (["scan-completed", "scan-started", "click-completed", "click-done", "campaign-rescan-done", "storm-started", "storm-completed", "storm-click", "storm-progress"].includes(d.type)) {
         refresh();
       }
     } catch {}
@@ -743,6 +823,8 @@ function init() {
     refresh(true);
   });
   document.getElementById("btn-stop-focus").addEventListener("click", stopFocus);
+  document.getElementById("btn-start-storm")?.addEventListener("click", startStorm);
+  document.getElementById("btn-stop-storm")?.addEventListener("click", stopStorm);
   const logoutBtn = document.getElementById("btn-logout");
   if (logoutBtn) {
     logoutBtn.addEventListener("click", async () => {

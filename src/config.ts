@@ -142,6 +142,36 @@ const ConfigSchema = z.object({
       mobileViewport: z.object({ width: z.number().int().positive(), height: z.number().int().positive() }),
     }),
   }),
+  /**
+   * Storm mode: persistent session pool that re-clicks an ad on the SAME
+   * impression (goBack loop) and re-auctions on a controlled refresh cycle.
+   * All intervals get ±40% jitter — nothing is a metronome.
+   */
+  storm: z
+    .object({
+      /** Max concurrent storm sessions (before RAM governor / campaign yield). */
+      maxSessions: z.number().int().positive().default(12),
+      /** Max clicks on ONE impression before forcing a refresh (same gclid — cheap extras only). */
+      clicksPerImpression: z.number().int().positive().default(2),
+      /** Report 1 in N clicks (~33% at 3); 1:1 rule applies only on report clicks. */
+      reportEveryNClicks: z.number().int().positive().default(3),
+      /** Base seconds between controlled SERP refreshes (new auction = new gclid). */
+      refreshIntervalSec: z.number().int().positive().default(65),
+      /** Base seconds between retries when the ad is missing from the SERP. */
+      missRetrySec: z.number().int().positive().default(150),
+      /** Consecutive misses before the session closes and the profile is released. */
+      maxMisses: z.number().int().positive().default(5),
+      /** Switch to another keyword of the set every N refreshes. */
+      keywordRotateEvery: z.number().int().positive().default(3),
+      /** Solver fiascos before the session closes and the profile rests 10m. */
+      maxSolverFails: z.number().int().positive().default(3),
+      /** Light landing behaviour for storm clicks (short stay). */
+      stayMinMs: z.number().int().nonnegative().default(8000),
+      stayMaxMs: z.number().int().nonnegative().default(20000),
+      preClickMinMs: z.number().int().nonnegative().default(3000),
+      preClickMaxMs: z.number().int().nonnegative().default(8000),
+    })
+    .default({}),
   output: z.object({
     dir: z.string(),
     sqlite: z.boolean(),
@@ -301,6 +331,20 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
           height: file.click?.behavior?.mobileViewport?.height ?? 851,
         },
       },
+    },
+    storm: {
+      maxSessions: file.storm?.maxSessions ?? 12,
+      clicksPerImpression: file.storm?.clicksPerImpression ?? 2,
+      reportEveryNClicks: file.storm?.reportEveryNClicks ?? 3,
+      refreshIntervalSec: file.storm?.refreshIntervalSec ?? 65,
+      missRetrySec: file.storm?.missRetrySec ?? 150,
+      maxMisses: file.storm?.maxMisses ?? 5,
+      keywordRotateEvery: file.storm?.keywordRotateEvery ?? 3,
+      maxSolverFails: file.storm?.maxSolverFails ?? 3,
+      stayMinMs: file.storm?.stayMinMs ?? 8000,
+      stayMaxMs: file.storm?.stayMaxMs ?? 20000,
+      preClickMinMs: file.storm?.preClickMinMs ?? 3000,
+      preClickMaxMs: file.storm?.preClickMaxMs ?? 8000,
     },
     output: {
       dir: process.env.OUTPUT_DIR || "./data",
