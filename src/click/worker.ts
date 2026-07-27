@@ -547,11 +547,20 @@ export async function clickAndReportAd(
     return { status: "skipped", error: "ad has no href", evidence: ev, reportResult: rep };
   }
 
+  const isAppAdTarget = isAppInstallAd(currentAd.displayDomain, currentAd.adHref);
+  // Click-first experiment (app targets only, config.click.appClickFirst):
+  // live storm data shows the report-first order sabotages app-ad clicks —
+  // Google marks the card "Bu reklam bildirildi" and kills its aclk chain on
+  // that impression. So app ads click FIRST (proof + Play evidence), restore
+  // the SERP, then report. Web targets keep the proven report-first order;
+  // the 1:1 gate only applies there (click-first failures are recorded
+  // honestly as "after click-first" — the single allowed exception).
+  const clickFirst = flow.reportEnabled && isAppAdTarget && !currentAd.isOrganic && !!ctx.config.click.appClickFirst;
+  const preEvidence: { finalUrl?: string | null; finalDomain?: string | null } = {};
+
   if (flow.reportEnabled) {
-    // 1) Evidence-first resolve (NO ad click): the report goes out on THIS
-    //    exact impression — impressions rotate, so report before the landing
-    //    journey, with the resolved betting domain already as evidence.
-    const preEvidence: { finalUrl?: string | null; finalDomain?: string | null } = {};
+    // 1) Evidence-first resolve (NO ad click): the report carries the
+    //    resolved betting/Play domain as evidence either way.
     try {
       // intent:// hrefs can't be resolved/navigated — resolve the HTTPS Play
       // page instead so the report carries real landing evidence.
@@ -574,7 +583,9 @@ export async function clickAndReportAd(
     } catch (resolveErr) {
       logger.debug({ jobId: jobForRecord.id, err: String(resolveErr) }, "pre-click resolve failed (report continues without it)");
     }
+  }
 
+  if (flow.reportEnabled && !clickFirst) {
     // 2) Report on the SAME fresh impression — with the resolved evidence.
     rep = await maybeReportAdBeforeClick(ctx, page, jobForRecord, currentAd, preEvidence);
     // Write-through: persist the report outcome NOW — a later job death
@@ -646,7 +657,6 @@ export async function clickAndReportAd(
   let clickLanded = false;
   // App ads only: watch requests so an observed aclk proves the click
   // reached Google even when the intent:// chain never leaves the SERP.
-  const isAppAdTarget = isAppInstallAd(currentAd.displayDomain, currentAd.adHref);
   const aclkWatch = isAppAdTarget ? watchAclkRequests(page) : null;
   try {
     // Play app cards all share the play.google.com display domain — a
@@ -1028,7 +1038,30 @@ export async function clickAndReportAd(
   // so this only fires for report-exempt paths (organic results) whose
   // report failed on this impression. Same fresh-impression retry logic.
   if (flow.reportEnabled && st === "success") {
-    rep = await retryReportOnFreshImpressions(flow, currentAd, jobForRecord, rep, ev);
+    if (clickFirst) {
+      // Click-first: the click is registered and the SERP restored — report
+      // NOW on the same impression, with the same fresh-impression retry
+      // ladder as report-first. If the report still fails, the click STANDS
+      // (single allowed 1:1 exception) and is recorded honestly.
+      rep = await maybeReportAdBeforeClick(ctx, page, jobForRecord, currentAd, preEvidence);
+      ctx.store.upsertReportOutcome(ctx.runId, jobForRecord, rep);
+      if (rep.status !== "submitted" && rep.status !== "filled") {
+        rep = await retryReportOnFreshImpressions(flow, currentAd, jobForRecord, rep, ev);
+      }
+      if (rep.status !== "submitted" && rep.status !== "filled") {
+        rep = {
+          status: rep.status,
+          message: `${rep.status} after click-first (click kept)${rep.message ? ` · ${rep.message}` : ""}`,
+        };
+        ctx.store.upsertReportOutcome(ctx.runId, jobForRecord, rep);
+        logger.warn(
+          { jobId: jobForRecord.id, domain: currentAd.displayDomain, reportStatus: rep.status },
+          "app click-first: report failed after retries — click kept (click-first exception)"
+        );
+      }
+    } else {
+      rep = await retryReportOnFreshImpressions(flow, currentAd, jobForRecord, rep, ev);
+    }
   }
 
   return { status: st, error: err, evidence: ev, reportResult: rep };

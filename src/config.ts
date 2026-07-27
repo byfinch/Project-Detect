@@ -129,6 +129,13 @@ const ConfigSchema = z.object({
      * If same ad still present → another window. Default 120 (2 hours).
      */
     focusWindowMinutes: z.number().int().positive().default(120),
+    /**
+     * App-install ad experiment: click FIRST (aclk/intent proof + Play
+     * evidence), restore the SERP, then report. Reporting first kills the
+     * card's aclk chain on that impression ("Bu reklam bildirildi"). Web
+     * targets keep report-first regardless. Default true.
+     */
+    appClickFirst: z.boolean().default(true),
     behavior: z.object({
       minPreClickMs: z.number().int().nonnegative(),
       maxPreClickMs: z.number().int().nonnegative(),
@@ -318,6 +325,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       sameAdCooldownMinutes: file.click?.sameAdCooldownMinutes ?? 20,
       maxProfilesPerDevice: file.click?.maxProfilesPerDevice ?? 5,
       focusWindowMinutes: file.click?.focusWindowMinutes ?? 120,
+      appClickFirst: file.click?.appClickFirst ?? true,
       behavior: {
         minPreClickMs: file.click?.behavior?.minPreClickMs ?? 5000,
         maxPreClickMs: file.click?.behavior?.maxPreClickMs ?? 15000,
