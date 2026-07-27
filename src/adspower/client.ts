@@ -123,6 +123,12 @@ interface StartOptions {
  * Extra Chromium flags passed to the profile browser via AdsPower's launch_args
  * (appended to AdsPower's own args). Perf/stability only — no fingerprint impact:
  * keeps background renderers from throttling away CPU on a saturated VPS.
+ *
+ * imagesEnabled=false is the resource diet, applied at the blink level: images
+ * are never fetched/decoded, with ZERO per-request CDP cost (the old
+ * page.route interception froze renderers on ad-heavy SERPs). Fonts/media have
+ * no blink-settings equivalent and are small — they load freely.
+ * Side effect (accepted): evidence screenshots contain no images.
  */
 const PERF_LAUNCH_ARGS = [
   "--disable-background-timer-throttling",
@@ -130,6 +136,7 @@ const PERF_LAUNCH_ARGS = [
   "--disable-background-networking",
   "--mute-audio",
   "--disable-features=Translate",
+  "--blink-settings=imagesEnabled=false",
 ];
 
 /**

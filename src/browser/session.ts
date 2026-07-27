@@ -4,10 +4,14 @@ import { logger } from "../logger.js";
 import { sleep } from "../util/time.js";
 
 /**
- * Resource diet: drop heavy binary payloads (image/font/media) so more parallel
- * profiles fit the same VPS. Documents, scripts, XHR/fetch and stylesheets
- * always pass — ad parsing, the report form and click locators are DOM/text
- * based, and evidence screenshots are accepted without images (team decision).
+ * Resource diet: drop heavy binary payloads (image/font/media).
+ *
+ * NOT applied automatically — per-request route interception freezes the
+ * renderer on ad-heavy SERPs (hundreds of tracking requests = hundreds of CDP
+ * round-trips; measured live: ~50% of clicks failed with a wedged renderer).
+ * The production diet is the --blink-settings=imagesEnabled=false launch flag
+ * (zero per-request cost). This helper stays exported for targeted manual use
+ * only (e.g. a page that must briefly render images for evidence).
  */
 const DIET_BLOCKED_TYPES = new Set(["image", "font", "media"]);
 
@@ -23,9 +27,8 @@ async function dietRouteHandler(route: Route): Promise<void> {
 const dietPages = new WeakSet<Page>();
 
 /**
- * Toggle the resource diet on ONE page. Lifted temporarily around captcha
- * solving (the OCR image and the reCAPTCHA widget need real image payloads)
- * and available for any page that must render images for evidence.
+ * Toggle route-interception resource diet on ONE page. Manual/opt-in only —
+ * see the warning above; prefer the launch flag for the always-on diet.
  */
 export async function setResourceDiet(page: Page, enabled: boolean): Promise<void> {
   try {
@@ -89,12 +92,8 @@ export class BrowserSession {
       !u.startsWith("devtools://") && !u.startsWith("chrome://") && !u.startsWith("chrome-extension://") && !u.startsWith("edge://");
     const usable = context.pages().find((p) => isContentPage(p.url()));
     const page = usable ?? (await context.newPage());
-    // Resource diet for the whole profile context: the main tab AND every tab
-    // opened later (ad-click landings, resolver pages) via the page event.
-    context.on("page", (p) => {
-      void setResourceDiet(p, true);
-    });
-    await setResourceDiet(page, true);
+    // NOTE: no automatic setResourceDiet here — the diet now lives in the
+    // --blink-settings=imagesEnabled=false launch flag (zero per-request cost).
     return new BrowserSession(browser, context, page);
   }
 

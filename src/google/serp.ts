@@ -3,7 +3,6 @@ import { resolve } from "node:path";
 import type { Page } from "playwright-core";
 import type { AppConfig } from "../config.js";
 import type { BrowserSession } from "../browser/session.js";
-import { setResourceDiet } from "../browser/session.js";
 import { uuleForLocation } from "./uule.js";
 import { solveRecaptchaMulti, solveImageCaptcha, reportIncorrect } from "../captcha/solver.js";
 import { logger } from "../logger.js";
@@ -185,10 +184,6 @@ export async function attemptCaptchaSolve(
   let paidAttempts = 0;
   let wallCleared = false;
 
-  // The OCR image and the reCAPTCHA widget need real image payloads — lift the
-  // resource diet for the duration of the solve, re-apply on the way out.
-  await setResourceDiet(page, false);
-
   try {
     // Private dedicated ISP IPs: recover fully. Prefer reCAPTCHA (2captcha Google docs).
     // Image is secondary; after image try, reload for a chance at reCAPTCHA again.
@@ -281,7 +276,6 @@ export async function attemptCaptchaSolve(
     return false;
   } finally {
     policy.recordWallClosed(profileId, wallCleared, paidAttempts);
-    await setResourceDiet(page, true);
   }
 }
 
