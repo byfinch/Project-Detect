@@ -40,7 +40,7 @@
     "maxDelayMs": 18000,
     "screenshots": true,
     "resolveLandings": true,
-    "concurrency": 10,
+    "concurrency": 12,
     "rotateProfiles": true,
     "queriesPerProfile": 5,
     "profilePrefix": "TR-ISP-",
@@ -57,7 +57,7 @@
   },
   "click": {
     "mode": "adaptive",
-    "concurrency": 10,
+    "concurrency": 12,
     "durationMinutes": 60,
     "clicksPerProfile": 30,
     "staggerWindowSeconds": 300,

@@ -42,8 +42,8 @@ const ConfigSchema = z.object({
         /** How long a tripped provider (or global) pause lasts, minutes. */
         breakerPauseMinutes: z.number().int().positive().default(30),
         /** Attempts allowed on a profile's 1st / 2nd wall of the day (3rd+: no solve). */
-        attemptsFirstWall: z.number().int().positive().default(2),
-        attemptsSecondWall: z.number().int().positive().default(1),
+        attemptsFirstWall: z.number().int().positive().default(3),
+        attemptsSecondWall: z.number().int().positive().default(2),
       })
       .default({}),
   }),
@@ -223,8 +223,8 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
         minClearRate: file.captcha?.budget?.minClearRate ?? 0.15,
         breakerMinSamples: file.captcha?.budget?.breakerMinSamples ?? 8,
         breakerPauseMinutes: file.captcha?.budget?.breakerPauseMinutes ?? 30,
-        attemptsFirstWall: file.captcha?.budget?.attemptsFirstWall ?? 2,
-        attemptsSecondWall: file.captcha?.budget?.attemptsSecondWall ?? 1,
+        attemptsFirstWall: file.captcha?.budget?.attemptsFirstWall ?? 3,
+        attemptsSecondWall: file.captcha?.budget?.attemptsSecondWall ?? 2,
       },
     },
     google: {
@@ -276,7 +276,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     },
     click: {
       mode: file.click?.mode ?? "adaptive",
-      concurrency: file.click?.concurrency ?? 10,
+      concurrency: file.click?.concurrency ?? 12,
       durationMinutes: file.click?.durationMinutes ?? 60,
       clicksPerProfile: file.click?.clicksPerProfile ?? 30,
       staggerWindowSeconds: file.click?.staggerWindowSeconds ?? 300,

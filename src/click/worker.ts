@@ -269,7 +269,9 @@ async function openProfile(ctx: WorkerContext, profileId: string, device: Device
         try {
           const { Store } = await import("../store/db.js");
           const vault = new Store(ctx.config.output.dir);
-          cool = vault.ipTrust.markSolverFailed(profileId, "click: trend warm-up solver failed");
+          // Solve-and-move-on: 3 chained solver fiascos earn a SHORT 10m break —
+          // never a long park; the next clean check makes the profile usable.
+          cool = vault.ipTrust.markSolverFailed(profileId, "click: trend warm-up solver failed", { maxCooldownMinutes: 10 });
           vault.close();
         } catch {
           /* vault optional */
@@ -449,19 +451,67 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
     const serpUrl = buildSerpUrl(ctx.config, job.keyword);
     const proxy = ctx.profileMeta.get(job.profileId);
     const captchaProxy = proxy ? captchaProxyFromProfile(proxy) : undefined;
-    const nav = await gotoSerp(session, serpUrl, ctx.config, {
+    const serpNavOpts = {
       captchaProxy: captchaProxy
         ? { proxy: captchaProxy.proxy, proxytype: captchaProxy.proxytype }
         : undefined,
       profileId: job.profileId,
-    });
+    };
+    let nav = await gotoSerp(session, serpUrl, ctx.config, serpNavOpts);
 
     if (nav.captcha) {
-      status = "captcha";
-      error = "CAPTCHA wall blocked SERP";
-      evidence.serpUrl = nav.finalUrl;
-      await closeProfile(ctx, session, job.profileId);
-      return { job, status, evidence, error, capturedAt, report: reportResult };
+      // The solver chain inside gotoSerp already failed on this wall. A wall
+      // this soon after warm-up (often right after a successful solve) means a
+      // low trust score — refresh reputation with ONE clean trend search
+      // instead of hammering the solver again (back-to-back solves against
+      // Google are a bot pattern), then retry the SERP once. The profile stays
+      // open in the SAME session as long as anything clears.
+      logger.warn(
+        { jobId: job.id, profileId: job.profileId, keyword: job.keyword },
+        "SERP wall survived the solver chain — refreshing reputation via one clean trend search"
+      );
+      const warm = await warmUp(session, ctx.config, { ...serpNavOpts, trendWarmup: true });
+      if (!warm.captcha) {
+        // skipSolve: trust was just refreshed — do NOT re-enter the solver loop here.
+        nav = await gotoSerp(session, serpUrl, ctx.config, { ...serpNavOpts, skipSolve: true });
+      }
+      if (nav.captcha) {
+        // Genuine solver defeat — short 10m break, no long park: the vault's
+        // next clean check makes the profile usable again. Infra errors
+        // (crash/CDP/timeout) never feed the cooldown ladder.
+        let cool: { cooldownMinutes: number; nextRetryAt: string } | null = null;
+        if (!warm.infraError) {
+          try {
+            const { Store } = await import("../store/db.js");
+            const vault = new Store(ctx.config.output.dir);
+            cool = vault.ipTrust.markSolverFailed(job.profileId, "click: SERP wall after trend refresh", { maxCooldownMinutes: 10 });
+            vault.close();
+          } catch {
+            /* vault optional */
+          }
+        }
+        status = "captcha";
+        error = "CAPTCHA wall blocked SERP";
+        evidence.serpUrl = nav.finalUrl;
+        logger.warn(
+          {
+            jobId: job.id,
+            profileId: job.profileId,
+            infraError: warm.infraError ?? false,
+            cooldownMinutes: cool?.cooldownMinutes,
+            nextRetryAt: cool?.nextRetryAt,
+          },
+          warm.infraError
+            ? "SERP still walled after trend refresh (infra error — NO cooldown)"
+            : "SERP still walled after trend refresh — short cooldown, profile released"
+        );
+        await closeProfile(ctx, session, job.profileId);
+        return { job, status, evidence, error, capturedAt, report: reportResult };
+      }
+      logger.info(
+        { jobId: job.id, profileId: job.profileId },
+        "SERP wall cleared after trend reputation refresh — continuing in the same session"
+      );
     }
 
     evidence.serpUrl = nav.finalUrl;

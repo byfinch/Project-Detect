@@ -243,14 +243,20 @@ export class IpTrustStore {
   /**
    * Solver exhausted on /sorry this session → short progressive cooldown (not permanent ban).
    * Prefer this over calling markHardCaptcha with "hard-block" wording.
+   *
+   * @param opts.maxCooldownMinutes Cap the ladder for THIS mark (solve-and-move-on
+   *   mode: 3 chained solver fiascos earn a short 10m break, never a long park).
    */
-  markSolverFailed(profileId: string, err = ""): SolverFailResult {
+  markSolverFailed(profileId: string, err = "", opts: { maxCooldownMinutes?: number } = {}): SolverFailResult {
     const now = new Date();
     const row = this.get(profileId);
     const fails = (row?.consecutiveFails ?? 0) + 1;
     const hard = (row?.totalHardFails ?? 0) + 1;
-    const cooldownMinutes = cooldownMinutesForFails(fails);
-    const next = computeNextRetryAt(fails, now);
+    let cooldownMinutes = cooldownMinutesForFails(fails);
+    if (opts.maxCooldownMinutes != null) {
+      cooldownMinutes = Math.min(cooldownMinutes, opts.maxCooldownMinutes);
+    }
+    const next = new Date(now.getTime() + cooldownMinutes * 60_000);
     // Soft for first fails; only long quarantine after repeated consecutive fails.
     const status: IpTrustStatus = fails >= 5 ? "quarantined" : "captcha";
     const msg = `solver-failed → cooldown ${cooldownMinutes}m | ${err}`.slice(0, 500);

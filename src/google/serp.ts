@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import type { Page } from "playwright-core";
 import type { AppConfig } from "../config.js";
 import type { BrowserSession } from "../browser/session.js";
+import { setResourceDiet } from "../browser/session.js";
 import { uuleForLocation } from "./uule.js";
 import { solveRecaptchaMulti, solveImageCaptcha, reportIncorrect } from "../captcha/solver.js";
 import { logger } from "../logger.js";
@@ -11,13 +12,17 @@ import { sleep } from "../util/time.js";
 const CONSENT_ACCEPT_LABELS = ["Tümünü kabul et", "Tümünü Kabul Et", "Kabul et", "Accept all", "Alle akzeptieren", "Kabul Et"];
 
 /**
- * Private ISP recovery: if a human can clear /sorry, the solver path must keep trying.
+ * Private ISP recovery: solve-and-move-on, never park.
  * Each reCAPTCHA try needs a FRESH data-s (never reuse challenge after fail).
- * Previous fail-fast (2 tries) marked profiles "captcha" while manual still worked — wrong.
+ * A wall gets at most 3 chained attempts; every attempt first calls the primary
+ * provider, then fails over to the other one (2captcha ↔ capsolver) on a fresh
+ * challenge. 3 chained fiascos → caller marks a short 10m break (no long park).
  */
-const RECAPTCHA_MAX_ATTEMPTS = 6;
+const RECAPTCHA_MAX_ATTEMPTS = 3;
 /** Prefer reCAPTCHA; OCR is backup. */
 const IMAGE_MAX_ATTEMPTS = 2;
+/** Short settle between a failed primary solve and the failover provider call. */
+const PROVIDER_FAILOVER_WAIT_MS = 4_000;
 /** 2captcha guide: wait after token submit for Google to process. */
 const POST_TOKEN_SETTLE_MS = 10_000;
 /** While waiting on solver, nudge so AdsPower/CDP does not idle-close. */
@@ -44,6 +49,12 @@ export interface SerpNavOptions {
   };
   /** AdsPower profile id — feeds the captcha policy gates (budget/attempts). */
   profileId?: string;
+  /**
+   * Detect the wall but do NOT run the solver chain on this navigation.
+   * Used right after a trend reputation refresh — hammering the solver again
+   * back-to-back is a bot pattern.
+   */
+  skipSolve?: boolean;
 }
 
 export function buildSerpUrl(config: AppConfig, keyword: string, start = 0): string {
@@ -174,6 +185,10 @@ export async function attemptCaptchaSolve(
   let paidAttempts = 0;
   let wallCleared = false;
 
+  // The OCR image and the reCAPTCHA widget need real image payloads — lift the
+  // resource diet for the duration of the solve, re-apply on the way out.
+  await setResourceDiet(page, false);
+
   try {
     // Private dedicated ISP IPs: recover fully. Prefer reCAPTCHA (2captcha Google docs).
     // Image is secondary; after image try, reload for a chance at reCAPTCHA again.
@@ -206,6 +221,27 @@ export async function attemptCaptchaSolve(
         if (ok) {
           wallCleared = true;
           return true;
+        }
+        // Provider failover: short settle + fresh challenge (data-s is one-shot,
+        // never reused across providers), then ONE call to the other provider.
+        const failover = failoverProviderFor(config, attempt);
+        if (failover) {
+          logger.info({ attempt, failover }, "primary provider failed — failing over to the other provider on a fresh challenge");
+          await sleep(PROVIDER_FAILOVER_WAIT_MS);
+          await reloadCaptchaPage(page);
+          if (await isRealSerp(page)) {
+            wallCleared = true;
+            return true;
+          }
+          const recaptchaAgain = await page.$(".g-recaptcha[data-sitekey], iframe[src*='recaptcha']").then((h) => !!h);
+          if (recaptchaAgain) {
+            paidAttempts += 1;
+            const okFailover = await solveRecaptchaOnce(page, config, attempt, captchaProxy, profileId, failover);
+            if (okFailover) {
+              wallCleared = true;
+              return true;
+            }
+          }
         }
         // 2captcha: never reuse data-s — always fresh challenge.
         await reloadCaptchaPage(page);
@@ -245,6 +281,7 @@ export async function attemptCaptchaSolve(
     return false;
   } finally {
     policy.recordWallClosed(profileId, wallCleared, paidAttempts);
+    await setResourceDiet(page, true);
   }
 }
 
@@ -419,6 +456,38 @@ function pageUrlFor2Captcha(fullUrl: string, rc: RecaptchaPageParams): string {
 }
 
 /**
+ * Primary solver provider for this attempt. Config wins; "auto" prefers
+ * CapSolver (faster = fresher data-s), rotating to 2captcha on late attempts.
+ */
+function primaryProviderFor(config: AppConfig, attempt: number): "capsolver" | "2captcha" | "auto" {
+  const preferCap = !!config.captcha.capSolverApiKey;
+  const has2c = !!(config.captcha.twoCaptchaApiKey || config.captcha.apiKey);
+  return config.captcha.provider === "2captcha"
+    ? "2captcha"
+    : config.captcha.provider === "capsolver"
+      ? "capsolver"
+      : preferCap
+        ? attempt <= 3 || !has2c
+          ? "capsolver"
+          : "2captcha"
+        : "2captcha";
+}
+
+/**
+ * The OTHER provider for failover within the same wall attempt — only when
+ * both providers have keys. Failover always runs on a fresh challenge
+ * (data-s is one-shot; never reused across providers).
+ */
+function failoverProviderFor(config: AppConfig, attempt: number): "capsolver" | "2captcha" | null {
+  const hasCap = !!config.captcha.capSolverApiKey;
+  const has2c = !!(config.captcha.twoCaptchaApiKey || config.captcha.apiKey);
+  if (!hasCap || !has2c) return null;
+  const primary = primaryProviderFor(config, attempt);
+  if (primary === "auto") return null;
+  return primary === "capsolver" ? "2captcha" : "capsolver";
+}
+
+/**
  * One reCAPTCHA solve attempt (caller owns the retry/reload loop).
  *
  * Strategy rotates by attempt number (fresh data-s each time after reload):
@@ -428,13 +497,16 @@ function pageUrlFor2Captcha(fullUrl: string, rc: RecaptchaPageParams): string {
  *  4) Enterprise + proxy + cookies + apply worker solution cookies before submit
  *
  * Private ISP proxies are NOT abandoned — we only rotate solve shape.
+ *
+ * @param providerOverride Forces the provider for this call (failover chain).
  */
 async function solveRecaptchaOnce(
   page: Page,
   config: AppConfig,
   attempt: number,
   captchaProxy?: SerpNavOptions["captchaProxy"],
-  profileId?: string
+  profileId?: string,
+  providerOverride?: "capsolver" | "2captcha"
 ): Promise<boolean> {
   const rc = await extractRecaptchaParams(page);
   if (!rc.key) {
@@ -488,18 +560,7 @@ async function solveRecaptchaOnce(
   );
 
   // Prefer CapSolver first (faster = fresher data-s). Fall back to 2captcha on later attempts.
-  const preferCap = !!(config.captcha.capSolverApiKey);
-  const has2c = !!(config.captcha.twoCaptchaApiKey || config.captcha.apiKey);
-  const providerForAttempt: "capsolver" | "2captcha" | "auto" =
-    config.captcha.provider === "2captcha"
-      ? "2captcha"
-      : config.captcha.provider === "capsolver"
-        ? "capsolver"
-        : preferCap
-          ? attempt <= 3 || !has2c
-            ? "capsolver"
-            : "2captcha"
-          : "2captcha";
+  const providerForAttempt = providerOverride ?? primaryProviderFor(config, attempt);
 
   const solved = await withBrowserKeepAlive(page, () =>
     solveRecaptchaMulti(siteKey, pageUrl, {
@@ -1318,7 +1379,7 @@ async function finishSerpNav(
 
   let captcha = await pageLooksLikeCaptcha(page);
   let captchaSolved = false;
-  if (captcha) {
+  if (captcha && !opts.skipSolve) {
     logger.warn({ ...logCtx, url: page.url().slice(0, 160), hasProxy: !!opts.captchaProxy }, "Google CAPTCHA / sorry wall detected");
     captchaSolved = await attemptCaptchaSolve(page, config, opts.captchaProxy, opts.profileId);
     if (captchaSolved) {

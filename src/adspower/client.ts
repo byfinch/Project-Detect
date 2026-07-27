@@ -120,6 +120,19 @@ interface StartOptions {
 }
 
 /**
+ * Extra Chromium flags passed to the profile browser via AdsPower's launch_args
+ * (appended to AdsPower's own args). Perf/stability only — no fingerprint impact:
+ * keeps background renderers from throttling away CPU on a saturated VPS.
+ */
+const PERF_LAUNCH_ARGS = [
+  "--disable-background-timer-throttling",
+  "--disable-renderer-backgrounding",
+  "--disable-background-networking",
+  "--mute-audio",
+  "--disable-features=Translate",
+];
+
+/**
  * Client for the AdsPower Local API.
  *
  * Contract (verified against a live install):
@@ -252,15 +265,24 @@ export class AdsPowerClient {
   async startBrowser(userId: string, opts: StartOptions = {}): Promise<StartResult> {
     // last_opened_tabs=0: do not reopen previous SERP/trend when profile starts.
     // open_tabs=1: skip AdsPower junk tabs. ip_tab=0: no proxy-check first tab.
-    return this.request<StartResult>("/api/v1/browser/start", {
-      params: {
-        user_id: userId,
-        headless: opts.headless ? 1 : 0,
-        open_tabs: opts.suppressPlatformTabs === false ? 0 : 1,
-        ip_tab: opts.openIpTab ? 1 : 0,
-        last_opened_tabs: opts.restoreLastTabs ? 1 : 0,
-      },
-    });
+    const params = {
+      user_id: userId,
+      headless: opts.headless ? 1 : 0,
+      open_tabs: opts.suppressPlatformTabs === false ? 0 : 1,
+      ip_tab: opts.openIpTab ? 1 : 0,
+      last_opened_tabs: opts.restoreLastTabs ? 1 : 0,
+    };
+    try {
+      // launch_args: AdsPower appends these to its own Chromium command line.
+      return await this.request<StartResult>("/api/v1/browser/start", {
+        params: { ...params, launch_args: JSON.stringify(PERF_LAUNCH_ARGS) },
+      });
+    } catch (err) {
+      // Older Local API builds may reject launch_args — never block a profile
+      // open on perf flags; retry once without them.
+      logger.warn({ userId, err: String(err) }, "browser/start with launch_args failed — retrying without extra args");
+      return await this.request<StartResult>("/api/v1/browser/start", { params });
+    }
   }
 
   async stopBrowser(userId: string, clean = true): Promise<void> {

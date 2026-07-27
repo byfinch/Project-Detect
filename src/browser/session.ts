@@ -1,7 +1,45 @@
 import { chromium } from "playwright-core";
-import type { Browser, BrowserContext, Page } from "playwright-core";
+import type { Browser, BrowserContext, Page, Route } from "playwright-core";
 import { logger } from "../logger.js";
 import { sleep } from "../util/time.js";
+
+/**
+ * Resource diet: drop heavy binary payloads (image/font/media) so more parallel
+ * profiles fit the same VPS. Documents, scripts, XHR/fetch and stylesheets
+ * always pass — ad parsing, the report form and click locators are DOM/text
+ * based, and evidence screenshots are accepted without images (team decision).
+ */
+const DIET_BLOCKED_TYPES = new Set(["image", "font", "media"]);
+
+async function dietRouteHandler(route: Route): Promise<void> {
+  if (DIET_BLOCKED_TYPES.has(route.request().resourceType())) {
+    await route.abort("blockedbyclient").catch(() => {});
+    return;
+  }
+  await route.continue().catch(() => {});
+}
+
+/** Pages with an active diet route (per-page routes, so solve/evidence can lift it). */
+const dietPages = new WeakSet<Page>();
+
+/**
+ * Toggle the resource diet on ONE page. Lifted temporarily around captcha
+ * solving (the OCR image and the reCAPTCHA widget need real image payloads)
+ * and available for any page that must render images for evidence.
+ */
+export async function setResourceDiet(page: Page, enabled: boolean): Promise<void> {
+  try {
+    if (enabled && !dietPages.has(page)) {
+      await page.route("**/*", dietRouteHandler);
+      dietPages.add(page);
+    } else if (!enabled && dietPages.has(page)) {
+      await page.unroute("**/*", dietRouteHandler);
+      dietPages.delete(page);
+    }
+  } catch (err) {
+    logger.debug({ err: String(err), enabled }, "resource diet toggle failed (ignored)");
+  }
+}
 
 /**
  * A Playwright client attached (over CDP) to a browser launched by AdsPower.
@@ -51,6 +89,12 @@ export class BrowserSession {
       !u.startsWith("devtools://") && !u.startsWith("chrome://") && !u.startsWith("chrome-extension://") && !u.startsWith("edge://");
     const usable = context.pages().find((p) => isContentPage(p.url()));
     const page = usable ?? (await context.newPage());
+    // Resource diet for the whole profile context: the main tab AND every tab
+    // opened later (ad-click landings, resolver pages) via the page event.
+    context.on("page", (p) => {
+      void setResourceDiet(p, true);
+    });
+    await setResourceDiet(page, true);
     return new BrowserSession(browser, context, page);
   }
 
