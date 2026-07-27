@@ -705,11 +705,37 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
             evidence.landingUrl = landing.url();
           }
         }
+        // Class 1 — proof-by-crash (app targets only): the intent chain
+        // killed/froze the tab right after the click. A dead renderer here
+        // IS the click proof (no chain, no death). Count the click honestly —
+        // no landing evidence; CF/behaviour skipped below (dead page).
+        let crashProof = false;
+        if (!landed && isAppAd) {
+          const aliveAfterClick = await Promise.race([
+            page.evaluate(() => 1).then(() => true, () => false),
+            sleep(5_000).then(() => false),
+          ]);
+          if (!aliveAfterClick) {
+            crashProof = true;
+            landed = true;
+            if (pkg) {
+              evidence.finalUrl = `https://play.google.com/store/apps/details?id=${pkg}&hl=tr&gl=tr`;
+              evidence.finalDomain = "play.google.com";
+            }
+            logger.warn({ domain, profileId, pkg }, "inline app ad: renderer died after conversion click — counting click (proof-by-crash, no landing evidence)");
+          }
+        }
         if (!landed) {
           status = "failed";
           error = "click did not leave the SERP (no navigation)";
           failed++;
           logger.warn({ domain, profileId }, "inline: click never navigated — not counting as click");
+        } else if (crashProof) {
+          // Dead tab — no CF/behaviour/restore possible; close stray tab.
+          if (landing !== page) await landing.close().catch(() => {});
+          error = "click proof: renderer died on intent chain";
+          status = "success";
+          completed++;
         } else {
 
         let cfPassed = true;

@@ -49,6 +49,24 @@ export function normalizeDomain(s: string): string {
   return s.toLowerCase().replace(/^(www\.|m\.)/, "").trim();
 }
 
+/**
+ * True for CDP target/context/browser death (crash, intent-chain tab kill,
+ * OOM). These are INFRA errors — never the profile's/IP's fault, so they
+ * must never feed a cooldown ladder.
+ */
+export function isTargetDeathError(err: unknown): boolean {
+  const s = String(err);
+  return /has been closed|target closed|session closed|target crash|page crashed|browser has been closed|connection closed|detached Frame/i.test(s);
+}
+
+/** Bounded renderer liveness probe (5s) — false = tab dead or frozen. */
+async function isRendererAlive(page: Page): Promise<boolean> {
+  return Promise.race([
+    page.evaluate(() => 1).then(() => true, () => false),
+    sleep(5_000).then(() => false),
+  ]);
+}
+
 export interface ClickableTarget {
   title: string;
   adHref: string | null;
@@ -620,10 +638,7 @@ export async function clickAndReportAd(
   // the Escape/dismiss below would then hang the slot until the 8m reaper
   // (11 jobs died exactly like this in one app-ad campaign). The report is
   // already persisted; skip the click cheaply instead of wedging.
-  const rendererAlive = await Promise.race([
-    page.evaluate(() => 1).then(() => true, () => false),
-    sleep(5_000).then(() => false),
-  ]);
+  const rendererAlive = await isRendererAlive(page);
   if (!rendererAlive) {
     logger.warn({ jobId: jobForRecord.id, domain: currentAd.displayDomain }, "click worker: renderer frozen before click phase — skipping click (report already out)");
     return { status: "skipped", error: "renderer frozen before click (intent redirect?)", evidence: ev, reportResult: rep };
@@ -655,6 +670,9 @@ export async function clickAndReportAd(
   // LEFT the SERP — without it, "success" is fake (landing=SERP evidence).
   let aclkFired = false;
   let clickLanded = false;
+  // Class 1 flag: set when the intent chain killed the tab — the post-click
+  // report block must not run on a dead renderer.
+  let rendererDied = false;
   // App ads only: watch requests so an observed aclk proves the click
   // reached Google even when the intent:// chain never leaves the SERP.
   const aclkWatch = isAppAdTarget ? watchAclkRequests(page) : null;
@@ -898,6 +916,27 @@ export async function clickAndReportAd(
     }
     clickLanded = landed;
     if (!landed) {
+      // Class 1 — proof-by-crash (app targets only, conversion click fired):
+      // the intent chain killed or froze the tab right after the mouse
+      // click. A dead renderer here IS the click proof — no chain, no death.
+      // Count the click honestly: no landing evidence, no screenshot; pkg
+      // (when known) still marks the Play store as the final domain.
+      if (isAppAdTarget && aclkFired && !(await isRendererAlive(page))) {
+        if (pkg) {
+          ev.finalUrl = `https://play.google.com/store/apps/details?id=${pkg}&hl=tr&gl=tr`;
+          ev.finalDomain = "play.google.com";
+        }
+        logger.warn(
+          { jobId: jobForRecord.id, domain: currentAd.displayDomain, pkg },
+          "app ad: renderer died after conversion click — counting click (proof-by-crash, no landing evidence)"
+        );
+        if (clickFirst) {
+          // The report cannot run on a dead tab — record the exception honestly.
+          rep = { status: "skipped", message: "report impossible — renderer died on intent chain (click kept, click-first)" };
+          ctx.store.upsertReportOutcome(ctx.runId, jobForRecord, rep);
+        }
+        return { status: "success", error: "click proof: renderer died on intent chain", evidence: ev, reportResult: rep };
+      }
       throw new Error("click did not leave the SERP (no navigation)");
     }
 
@@ -1018,7 +1057,23 @@ export async function clickAndReportAd(
       await restoreSerp(page, serpUrl);
     }
   } catch (clickErr) {
-    if (aclkFired && clickLanded) {
+    if (isAppAdTarget && aclkFired && isTargetDeathError(clickErr)) {
+      // Class 1 (exception variant): the click phase died WITH the tab —
+      // same proof-by-crash logic as the dead-renderer branch above.
+      st = "success";
+      err = "click proof: renderer died on intent chain";
+      rendererDied = true;
+      const crashPkg = appAdPackage(currentAd.adHref) ?? (aclkWatch?.packageId() ?? null);
+      if (crashPkg) {
+        ev.finalUrl = `https://play.google.com/store/apps/details?id=${crashPkg}&hl=tr&gl=tr`;
+        ev.finalDomain = "play.google.com";
+      }
+      if (clickFirst) {
+        rep = { status: "skipped", message: "report impossible — renderer died on intent chain (click kept, click-first)" };
+        ctx.store.upsertReportOutcome(ctx.runId, jobForRecord, rep);
+      }
+      logger.warn({ jobId: jobForRecord.id, domain: currentAd.displayDomain, pkg: crashPkg }, "app ad: click phase died with tab — counting click (proof-by-crash)");
+    } else if (aclkFired && clickLanded) {
       // Google saw the click AND we left the SERP — a later landing error
       // (CF wall, resolve) is best-effort, not a failed click.
       st = "success";
@@ -1026,7 +1081,11 @@ export async function clickAndReportAd(
       logger.warn({ jobId: jobForRecord.id, err }, "click fired but landing failed — counting as click");
     } else {
       st = "failed";
-      err = String(clickErr);
+      // Class 2: browser/page death is INFRA (never the profile's fault —
+      // no cooldown ladder entry for these anywhere downstream).
+      err = isTargetDeathError(clickErr)
+        ? `infra: browser/page crashed during click phase — ${String(clickErr).slice(0, 100)}`
+        : String(clickErr);
       logger.warn({ jobId: jobForRecord.id, err }, "click step failed (no aclk) — report was already sent on the impression");
     }
     await restoreSerp(page, serpUrl);
@@ -1038,7 +1097,7 @@ export async function clickAndReportAd(
   // so this only fires for report-exempt paths (organic results) whose
   // report failed on this impression. Same fresh-impression retry logic.
   if (flow.reportEnabled && st === "success") {
-    if (clickFirst) {
+    if (clickFirst && !rendererDied) {
       // Click-first: the click is registered and the SERP restored — report
       // NOW on the same impression, with the same fresh-impression retry
       // ladder as report-first. If the report still fails, the click STANDS
@@ -1059,9 +1118,11 @@ export async function clickAndReportAd(
           "app click-first: report failed after retries — click kept (click-first exception)"
         );
       }
-    } else {
+    } else if (!clickFirst) {
       rep = await retryReportOnFreshImpressions(flow, currentAd, jobForRecord, rep, ev);
     }
+    // clickFirst && rendererDied: report already recorded as impossible above —
+    // never run the report flow on a dead renderer.
   }
 
   return { status: st, error: err, evidence: ev, reportResult: rep };
@@ -1358,7 +1419,11 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
   } catch (err) {
     logger.error({ jobId: job.id, profileId: job.profileId, err: String(err) }, "click worker failed");
     status = "failed";
-    error = String(err);
+    // Class 2: browser/page death BEFORE the click (SERP load, profile open)
+    // is INFRA — mark it honestly; no cooldown ladder anywhere for these.
+    error = isTargetDeathError(err)
+      ? `infra: browser/page crashed during SERP load — ${String(err).slice(0, 100)}`
+      : String(err);
   } finally {
     if (session) {
       await closeProfile(ctx, session, job.profileId);

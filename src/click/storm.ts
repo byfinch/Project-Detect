@@ -30,6 +30,7 @@
  * handoff can drive it without changes here.
  */
 import { AdsPowerClient, captchaProxyFromProfile, type ProfileSummary } from "../adspower/client.js";
+import type { Page } from "playwright-core";
 import type { AppConfig } from "../config.js";
 import type { BrowserSession } from "../browser/session.js";
 import { buildSerpUrl, gotoSerp, warmUp, type SerpNavOptions } from "../google/serp.js";
@@ -133,6 +134,52 @@ export class StormManager {
   private readonly sessions = new Map<string, SessionState>();
   /** Per-profile re-pick backoff after an infra/session failure (epoch ms). */
   private readonly retryAfter = new Map<string, number>();
+  /** Consecutive infra crashes per profile (Class 2 accounting). */
+  private readonly infraCrashStreak = new Map<string, number>();
+
+  /**
+   * Class 2 — infra crash accounting: browser/page death is never the
+   * profile's fault (infra ≠ solver-fail), so this NEVER touches the vault
+   * cooldown ladder. 3 consecutive infra crashes → 30 min LOW PRIORITY in
+   * the pool (long re-pick backoff, not a ban); a successful click resets
+   * the streak.
+   */
+  private noteInfraCrash(profileId: string): void {
+    const streak = (this.infraCrashStreak.get(profileId) ?? 0) + 1;
+    this.infraCrashStreak.set(profileId, streak);
+    const backoffMs = streak >= 3 ? 30 * 60_000 : jitterSec(120) * 1000;
+    this.retryAfter.set(profileId, Date.now() + backoffMs);
+    logger.warn(
+      { profileId, streak, backoffMinutes: Math.round(backoffMs / 60_000) },
+      "storm: infra crash — profile deprioritised in pool (no cooldown)"
+    );
+  }
+
+  /**
+   * Class 1 recovery: the intent chain killed the session tab. Open a FRESH
+   * page on the same context (resource diet auto-applies via the context
+   * page handler) and load a fresh SERP (new impression). Returns null when
+   * the context itself is dead — the caller closes the session as infra.
+   */
+  private async recoverAfterCrash(
+    sess: BrowserSession,
+    st: SessionState,
+    navOpts: SerpNavOptions
+  ): Promise<{ page: Page; session: BrowserSession; serpUrl: string; finalUrl: string } | null> {
+    try {
+      await sess.page.close().catch(() => {}); // dead tab — best effort
+      const np = await sess.newPage(); // throws when the context is dead
+      // gotoSerp/warmUp only read session.page — rebind to the fresh tab.
+      const rebound = { ...sess, page: np } as unknown as BrowserSession;
+      const nav = await this.navigateSerp(rebound, st, navOpts);
+      if (!nav) return null; // wall during recovery — caller closes session
+      logger.info({ profileId: st.profileId, keyword: st.keyword }, "storm: recovered on fresh page after intent-chain tab death");
+      return { page: np, session: rebound, ...nav };
+    } catch (err) {
+      logger.warn({ profileId: st.profileId, err: String(err) }, "storm: crash recovery failed (context dead?)");
+      return null;
+    }
+  }
   private stopped = false;
   private startedAt: string | null = null;
   private readonly totals = { clicks: 0, reports: 0, failed: 0, skipped: 0 };
@@ -467,6 +514,7 @@ export class StormManager {
     if (result.status === "success") {
       st.clicks++;
       this.totals.clicks++;
+      this.infraCrashStreak.delete(st.profileId); // a working click resets the infra streak
     } else if (result.status === "skipped") {
       st.skipped++;
       this.totals.skipped++;
@@ -616,14 +664,15 @@ export class StormManager {
     try {
       session = await openProfile(this.workerCtx, st.profileId, this.opts.device);
       if (!session) {
-        // Open/CDP infra failure — no cooldown; a short re-pick backoff only
-        // so the supervisor does not spin on the same broken profile.
+        // Open/CDP infra failure — no cooldown; the streak counter applies
+        // the Class 2 backoff (3 consecutive → 30 min low priority).
         st.exitReason = "profile open failed (infra — no cooldown)";
-        this.retryAfter.set(st.profileId, Date.now() + jitterSec(120) * 1000);
+        this.noteInfraCrash(st.profileId);
         return;
       }
       const sess = session;
-      const page = sess.page;
+      let curNav: BrowserSession = sess; // rebound to a fresh page after crash recovery
+      let page = sess.page;
       const evidenceDir = ensureEvidenceDir(this.opts.outputDir, this.runIdNum);
       const meta = this.workerCtx.profileMeta.get(st.profileId);
       const profileKey = meta?.name || st.profileId;
@@ -646,7 +695,7 @@ export class StormManager {
       while (!this.stopped && !st.stopRequested) {
         // 1. Ensure a live SERP (initial load / controlled refresh / miss retry).
         if (!haveSerp) {
-          const nav = await this.navigateSerp(sess, st, navOpts);
+          const nav = await this.navigateSerp(curNav, st, navOpts);
           if (!nav) {
             if (st.solverFails >= storm.maxSolverFails) {
               st.exitReason = `${storm.maxSolverFails} solver fiascos — profile rests 10m`;
@@ -692,6 +741,7 @@ export class StormManager {
         // 4. Back-loop: up to clicksPerImpression clicks on THIS impression —
         //    clickAndReportAd restores the SERP via goBack (bfcache), so the
         //    same impression (same gclid) survives between iterations.
+        let justRecovered = false;
         let clicksOnImpression = 0;
         while (
           clicksOnImpression < storm.clicksPerImpression &&
@@ -726,6 +776,26 @@ export class StormManager {
           if (!(await this.waitInterruptible(jitterRangeMs(storm.preClickMinMs, storm.preClickMaxMs), st))) break;
           const result = await clickAndReportAd(flow, target, job);
           this.recordResult(st, job, result);
+          if (result.status === "success" && /renderer died on intent chain/.test(result.error ?? "")) {
+            // Class 1 recovery: the tab died ON the intent chain (that death
+            // is the click proof). Reopen on a fresh page + fresh SERP and
+            // keep the session going; a dead context ends the session as
+            // infra (no cooldown) and the pool picks another profile.
+            const rec = await this.recoverAfterCrash(sess, st, navOpts);
+            if (!rec) {
+              st.exitReason = "infra: context died on intent chain — session closed (no cooldown)";
+              this.noteInfraCrash(st.profileId);
+              return;
+            }
+            page = rec.page;
+            curNav = rec.session;
+            serpUrl = rec.serpUrl;
+            serpFinalUrl = rec.finalUrl;
+            haveSerp = true;
+            nextRefreshAt = Date.now() + jitterSec(storm.refreshIntervalSec) * 1000;
+            justRecovered = true;
+            break; // fresh impression — the outer loop re-parses the new SERP
+          }
           if (result.status !== "success") break; // failed / 1:1 skip → fresh auction, don't hammer
           clicksOnImpression++;
           if (clicksOnImpression < storm.clicksPerImpression && !this.stopped && !st.stopRequested) {
@@ -744,6 +814,7 @@ export class StormManager {
           st.exitReason = "hourly click cap reached — profile rests";
           break;
         }
+        if (justRecovered) continue; // fresh SERP already loaded by crash recovery — re-parse now
 
         // 5. Controlled refresh: wait out the remainder of the interval
         //    (abort-aware), rotate the keyword when due, then re-auction.
@@ -760,9 +831,10 @@ export class StormManager {
         haveSerp = false;
       }
     } catch (err) {
-      // Proxy/CDP/infra error — NO cooldown; the profile may retry next round.
+      // Proxy/CDP/infra error — NO cooldown; the streak counter applies the
+      // Class 2 backoff (3 consecutive → 30 min low priority, not a ban).
       st.exitReason = `infra: ${String(err).slice(0, 120)}`;
-      this.retryAfter.set(st.profileId, Date.now() + jitterSec(120) * 1000);
+      this.noteInfraCrash(st.profileId);
       logger.warn({ profileId: st.profileId, err: String(err) }, "storm session died on infra error — no cooldown");
     } finally {
       if (session) {
