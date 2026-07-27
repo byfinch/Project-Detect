@@ -384,14 +384,18 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
       } else if (!anchor && ad.adHref) {
         // Report is already out; anchor gone after the report flow (SERP rotated
         // or report navigated the page) — fire the parsed aclk directly.
+        // intent:// hrefs cannot be goto-fired: a self-fired intent request
+        // would fake the listener's proof, so those take the honest fail path.
         logger.warn({ domain, profileId }, "inline: anchor gone after report — direct aclk goto fallback");
         const aclkWatch = ensureAclkWatch();
-        await page.goto(ad.adHref, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
+        if (!ad.adHref.startsWith("intent://")) {
+          await page.goto(ad.adHref, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
+        }
         evidence.landingUrl = page.url();
         const stuckOnSerp = page.url() === serpUrl || /\/search[?#]/.test(page.url());
         // App ads: the intent:// chain cannot navigate a desktop browser, but
-        // an observed aclk request means Google DID register the click.
-        const aclkSeen = aclkWatch?.sawAclk() ?? false;
+        // an observed aclk/intent request means Google DID register the click.
+        const aclkSeen = aclkWatch?.sawClickProof() ?? false;
         // Honest outcome: aclk goto that never leaves the SERP and never
         // fired an aclk request is NOT a click.
         if (stuckOnSerp && !aclkSeen) {
@@ -551,7 +555,9 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
         const [newPage] = await Promise.all([
           page.context().waitForEvent("page", { timeout: 18000 }).catch(() => null),
           anchor!.click().catch(async () => {
-            if (ad.adHref) {
+            // intent:// hrefs cannot be goto-fired (a self-fired intent would
+            // fake the listener's proof) — leave the failure to the honest path.
+            if (ad.adHref && !ad.adHref.startsWith("intent://")) {
               await page.goto(ad.adHref, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
             }
           }),
@@ -581,15 +587,23 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
         // though Google DID register the click. The request listener is the
         // source of truth: an observed aclk request = click registered.
         const isAppAd = isAppInstallAd(ad.displayDomain, ad.adHref);
-        if (isAppAd && !landed && !aclkWatch?.sawAclk() && ad.adHref && landing === page) {
-          // No aclk observed from the click — fire the parsed aclk directly
-          // (that request IS the click); the listener catches it now.
+        if (isAppAd && !landed && !aclkWatch?.sawClickProof() && ad.adHref && !ad.adHref.startsWith("intent://") && landing === page) {
+          // No click proof observed from the click — fire the parsed aclk
+          // directly (that request IS the click); the listener catches it now.
+          // intent:// hrefs are EXCLUDED: goto cannot fire them, and a
+          // self-fired intent request would fake the proof the listener verifies.
           logger.warn({ domain, profileId }, "inline app ad: no aclk observed — direct aclk goto fallback");
           await page.goto(ad.adHref, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
           evidence.landingUrl = page.url();
           landed = !onSerp(evidence.landingUrl);
+        } else if (isAppAd && !landed && !aclkWatch?.sawClickProof() && landing === page) {
+          // intent:// href (or none): cannot be fired by goto — but the click's
+          // chain (aclk → intent) may still be in flight; bounded grace window.
+          for (let i = 0; i < 10 && !aclkWatch?.sawClickProof(); i++) {
+            await sleep(500);
+          }
         }
-        const aclkSeen = aclkWatch?.sawAclk() ?? false;
+        const aclkSeen = aclkWatch?.sawClickProof() ?? false;
         // pkg from ad href, the card DOM, the landing URL, or the observed
         // intent://play.google.com redirect.
         let pkg: string | null = null;

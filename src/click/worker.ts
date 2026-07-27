@@ -732,8 +732,10 @@ export async function clickAndReportAd(
       }
       if (!clickAnchor) {
         // Last resort: fire the aclk directly — the parsed href IS the click
-        // URL; DOM anchor is only the pretty way to trigger it.
-        if (currentAd.adHref) {
+        // URL; DOM anchor is only the pretty way to trigger it. intent://
+        // hrefs cannot be goto-fired (and a self-fired intent would fake the
+        // listener's proof), so those fall through to the honest error.
+        if (currentAd.adHref && !currentAd.adHref.startsWith("intent://")) {
           logger.warn({ jobId: jobForRecord.id, domain: currentAd.displayDomain }, "anchor missing — direct aclk goto fallback");
           await page.goto(currentAd.adHref, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
           aclkFired = true;
@@ -744,7 +746,7 @@ export async function clickAndReportAd(
         const [newPage] = await Promise.all([
           page.context().waitForEvent("page", { timeout: 20000 }).catch(() => null),
           clickAnchor.click().then(() => { aclkFired = true; }).catch(async () => {
-            if (currentAd.adHref) {
+            if (currentAd.adHref && !currentAd.adHref.startsWith("intent://")) {
               await page.goto(currentAd.adHref, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
               aclkFired = true;
             }
@@ -770,15 +772,24 @@ export async function clickAndReportAd(
     // stays on the SERP even though Google DID register the click. The
     // request listener is the source of truth here: an observed aclk
     // request means the click IS registered (no SERP exit required).
-    if (isAppAdTarget && !landed && !aclkWatch?.sawAclk() && currentAd.adHref && landingPage === page) {
-      // No aclk observed from the mouse click — fire the parsed aclk
+    if (isAppAdTarget && !landed && !aclkWatch?.sawClickProof() && currentAd.adHref && !currentAd.adHref.startsWith("intent://") && landingPage === page) {
+      // No click proof observed from the mouse click — fire the parsed aclk
       // directly (that request IS the click); the listener catches it now.
+      // intent:// hrefs are EXCLUDED here: goto cannot fire them, and a
+      // self-fired intent request would fake the proof the listener verifies.
       logger.warn({ jobId: jobForRecord.id, domain: currentAd.displayDomain }, "app ad: no aclk observed — direct aclk goto fallback");
       await page.goto(currentAd.adHref, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
       ev.landingUrl = page.url();
       landed = !onSerp(ev.landingUrl);
+    } else if (isAppAdTarget && !landed && !aclkWatch?.sawClickProof() && landingPage === page) {
+      // intent:// href (or none): cannot be fired by goto — but the mouse
+      // click's chain (aclk → intent) may still be in flight, so give the
+      // listener a bounded grace window before judging the click failed.
+      for (let i = 0; i < 10 && !aclkWatch?.sawClickProof(); i++) {
+        await sleep(500);
+      }
     }
-    const aclkSeen = aclkWatch?.sawAclk() ?? false;
+    const aclkSeen = aclkWatch?.sawClickProof() ?? false;
     // pkg from the ad href, the card DOM, the landing URL, or the observed
     // intent://play.google.com redirect.
     const pkg = isAppAdTarget
@@ -923,7 +934,12 @@ export async function clickAndReportAd(
     if (landingPage !== page) {
       await landingPage.close().catch(() => {});
     }
-    if (!page.url().includes("google.")) {
+    // Restore whenever we are not back on a search page. The old
+    // includes("google.") guard also matched play.google.com — after an
+    // app-ad success the page stayed on the Play Store, which stranded
+    // storm's back-loop (and the harvest pass) off the SERP.
+    const afterClickUrl = page.url();
+    if (afterClickUrl !== serpUrl && !/\/search[?#]/.test(afterClickUrl)) {
       await restoreSerp(page, serpUrl);
     }
   } catch (clickErr) {
