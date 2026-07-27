@@ -379,6 +379,25 @@ async function refresh(force = false) {
       }
       sp.title = lines.join("\n");
     }
+    const mp = document.getElementById("pill-mail");
+    if (mp) {
+      const ep = ops.emailPool;
+      if (ep) {
+        mp.textContent = `mail ${ep.active}/${ep.minSize}`;
+        const low = ep.active < ep.minSize || ep.fresh < Math.ceil(ep.minSize * 0.3) || !!ep.refillBackoffUntil;
+        mp.classList.toggle("off", low);
+        const lines = [
+          `Mail havuzu · aktif ${ep.active} / hedef ${ep.minSize} (toplam ${ep.total})`,
+          `Taze: ${ep.fresh} · son 24s kullanım: ${ep.usedLast24h}`,
+          `Üretim: son 1 saatte ${ep.createdLastHour} / limit ${ep.refillPerHour}`,
+        ];
+        if (ep.refillBackoffUntil) lines.push(`RATE-LIMIT: ${ep.refillBackoffUntil} — üretim duraklatıldı`);
+        mp.title = lines.join("\n");
+      } else {
+        mp.textContent = "mail kapalı";
+        mp.classList.add("off");
+      }
+    }
     isScanRunningFromOps = isScanRunning(ops.jobs);
     updateOps(ops);
     updateStorm(stormRes?.storm);

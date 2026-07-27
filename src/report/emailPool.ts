@@ -20,6 +20,15 @@ import { sleep } from "../util/time.js";
 const MAILTM_BASE = "https://api.mail.tm";
 /** mail.tm allows 8 QPS; account creation is 2 requests, stay well below. */
 const CREATE_GAP_MS = 800;
+/** Pause account creation for this long after a 429/5xx from mail.tm. */
+const RATE_LIMIT_BACKOFF_MS = 30 * 60_000;
+/** Trigger a top-up when never-used addresses drop below this share of minSize. */
+const FRESH_RATIO = 0.3;
+
+/** mail.tm errors are shaped "mail.tm POST /accounts → 429 ...". */
+function isRateLimitOrServerError(err: unknown): boolean {
+  return /→\s*(429|5\d\d)\b/.test(String(err));
+}
 
 export interface PoolEmail {
   address: string;
@@ -38,6 +47,14 @@ export interface PoolStats {
   disabled: number;
   error: number;
   avgUse: number;
+  /** Active addresses never handed out yet. */
+  fresh: number;
+  /** Addresses consumed in the last 24 hours. */
+  usedLast24h: number;
+  /** Accounts created in the last hour (refill budget tracking). */
+  createdLastHour: number;
+  /** ISO time until which creation is paused after a 429/5xx, or null. */
+  refillBackoffUntil: string | null;
 }
 
 interface MailTmDomain {
@@ -116,6 +133,8 @@ export class EmailPool {
   private client = new MailTmClient();
   private refilling = false;
   private closed = false;
+  /** Creation paused until this epoch ms (set on 429/5xx from mail.tm). */
+  private backoffUntil = 0;
 
   constructor(outputDir: string) {
     const dbPath = resolve(outputDir, "detect.sqlite");
@@ -238,6 +257,18 @@ export class EmailPool {
     }
   }
 
+  /** Preview the address acquire() would hand out next, WITHOUT consuming it. */
+  peek(): PoolEmail | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM email_pool WHERE status = 'active'
+         ORDER BY last_used_at IS NULL DESC, last_used_at ASC, use_count ASC
+         LIMIT 1`
+      )
+      .get() as Record<string, unknown> | undefined;
+    return row ? this.mapRow(row) : null;
+  }
+
   /** LRU acquire: least-recently-used active address (never-used first). */
   acquire(): PoolEmail | null {
     const row = this.db
@@ -256,10 +287,20 @@ export class EmailPool {
     return this.mapRow(row);
   }
 
-  /** Active count below target → top up in the background (fire-and-forget). */
-  ensureSize(targetSize: number): void {
-    if (this.activeCount() >= targetSize) return;
-    void this.refill(targetSize).catch((err) => {
+  /**
+   * Top up in the background (fire-and-forget) when the pool runs low:
+   * either active < targetSize, or never-used addresses dropped below
+   * FRESH_RATIO of targetSize (keeps short-interval address reuse rare).
+   */
+  ensureSize(targetSize: number, perHour = 40): void {
+    const active = this.activeCount();
+    const freshFloor = Math.ceil(targetSize * FRESH_RATIO);
+    const fresh = this.freshCount();
+    if (active >= targetSize && fresh >= freshFloor) return;
+    // Fresh-ratio trigger: create extra accounts beyond the size target so
+    // the fresh share recovers (used addresses stay active for later reuse).
+    const target = Math.max(targetSize, active + (freshFloor - fresh));
+    void this.refill(target, perHour).catch((err) => {
       logger.warn({ err: String(err) }, "email pool auto-refill failed");
     });
   }
@@ -283,9 +324,33 @@ export class EmailPool {
     return Number(row.c) || 0;
   }
 
-  /** Create accounts until the active pool reaches targetSize. Serialized. */
-  async refill(targetSize: number): Promise<{ created: number; failed: number; active: number }> {
+  /** Active addresses never handed out yet. */
+  private freshCount(): number {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS c FROM email_pool WHERE status = 'active' AND last_used_at IS NULL`)
+      .get() as { c: number };
+    return Number(row.c) || 0;
+  }
+
+  /** Accounts created within the last hour (persisted — survives restarts). */
+  private createdLastHour(): number {
+    const since = new Date(Date.now() - 60 * 60_000).toISOString();
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS c FROM email_pool WHERE created_at >= ?`)
+      .get(since) as { c: number };
+    return Number(row.c) || 0;
+  }
+
+  /**
+   * Create accounts until the active pool reaches targetSize. Serialized.
+   * Bounded by perHour creations/hour; pauses for 30 min on mail.tm 429/5xx.
+   */
+  async refill(targetSize: number, perHour = 40): Promise<{ created: number; failed: number; active: number }> {
     if (this.refilling) return { created: 0, failed: 0, active: this.activeCount() };
+    if (Date.now() < this.backoffUntil) {
+      logger.info({ until: new Date(this.backoffUntil).toISOString() }, "email pool: refill skipped — rate-limit backoff active");
+      return { created: 0, failed: 0, active: this.activeCount() };
+    }
     this.refilling = true;
     let created = 0;
     let failed = 0;
@@ -293,6 +358,10 @@ export class EmailPool {
       let need = Math.max(0, targetSize - this.activeCount());
       while (need > 0) {
         if (this.closed) break;
+        if (this.createdLastHour() >= perHour) {
+          logger.info({ perHour, target: targetSize, active: this.activeCount() }, "email pool: hourly refill budget reached — stopping");
+          break;
+        }
         try {
           const acc = await this.client.createAccount();
           const info = this.db
@@ -312,6 +381,11 @@ export class EmailPool {
         } catch (err) {
           failed++;
           logger.warn({ err: String(err) }, "email pool: account creation failed");
+          if (isRateLimitOrServerError(err)) {
+            this.backoffUntil = Date.now() + RATE_LIMIT_BACKOFF_MS;
+            logger.warn({ until: new Date(this.backoffUntil).toISOString() }, "email pool: mail.tm rate limited — pausing refill for 30 min");
+            break;
+          }
           if (failed >= 3) {
             logger.warn("email pool: 3 consecutive create failures — stopping refill");
             break;
@@ -332,6 +406,9 @@ export class EmailPool {
     const use = this.db
       .prepare(`SELECT AVG(use_count) AS a FROM email_pool WHERE status = 'active'`)
       .get() as { a: number | null };
+    const used24 = this.db
+      .prepare(`SELECT COUNT(*) AS c FROM email_pool WHERE last_used_at >= ?`)
+      .get(new Date(Date.now() - 24 * 60 * 60_000).toISOString()) as { c: number };
     const byStatus = new Map(rows.map((r) => [r.status, Number(r.c) || 0]));
     return {
       total: rows.reduce((s, r) => s + (Number(r.c) || 0), 0),
@@ -339,6 +416,10 @@ export class EmailPool {
       disabled: byStatus.get("disabled") ?? 0,
       error: byStatus.get("error") ?? 0,
       avgUse: Math.round((Number(use.a) || 0) * 10) / 10,
+      fresh: this.freshCount(),
+      usedLast24h: Number(used24.c) || 0,
+      createdLastHour: this.createdLastHour(),
+      refillBackoffUntil: Date.now() < this.backoffUntil ? new Date(this.backoffUntil).toISOString() : null,
     };
   }
 
@@ -394,12 +475,12 @@ export function closeEmailPools(): void {
  */
 export function acquireReportEmail(
   outputDir: string,
-  opts: { enabled: boolean; minSize?: number; fallback: string }
+  opts: { enabled: boolean; minSize?: number; refillPerHour?: number; fallback: string }
 ): { email: string; fromPool: boolean } {
   if (opts.enabled) {
     try {
       const pool = getEmailPool(outputDir);
-      pool.ensureSize(opts.minSize ?? 10);
+      pool.ensureSize(opts.minSize ?? 500, opts.refillPerHour ?? 40);
       const acc = pool.acquire();
       if (acc) return { email: acc.address, fromPool: true };
       logger.warn("email pool empty — falling back to static reportEmail");

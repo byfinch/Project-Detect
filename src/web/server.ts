@@ -952,6 +952,19 @@ export function createWebServer(port: number): void {
               return null;
             }
           })(),
+          emailPool: (() => {
+            try {
+              if (!config.report.emailPool.enabled) return null;
+              const pool = getEmailPool(config.output.dir);
+              return {
+                minSize: config.report.emailPool.minSize,
+                refillPerHour: config.report.emailPool.refillPerHour,
+                ...pool.stats(),
+              };
+            } catch {
+              return null;
+            }
+          })(),
           config: {
             scanConcurrency: config.scan.concurrency,
             clickConcurrency: config.click.concurrency,
@@ -2320,7 +2333,13 @@ export function createWebServer(port: number): void {
   app.get("/api/emails/pool", (req: Request, res: Response) => {
     try {
       const pool = getEmailPool(config.output.dir);
-      res.json({ enabled: config.report.emailPool.enabled, stats: pool.stats(), emails: pool.list() });
+      res.json({
+        enabled: config.report.emailPool.enabled,
+        minSize: config.report.emailPool.minSize,
+        refillPerHour: config.report.emailPool.refillPerHour,
+        stats: pool.stats(),
+        emails: pool.list(),
+      });
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }
@@ -2331,7 +2350,7 @@ export function createWebServer(port: number): void {
     try {
       const size = Number(req.body?.size) > 0 ? Number(req.body.size) : config.report.emailPool.minSize;
       const pool = getEmailPool(config.output.dir);
-      const result = await pool.refill(size);
+      const result = await pool.refill(size, config.report.emailPool.refillPerHour);
       res.json({ ok: true, ...result, stats: pool.stats() });
     } catch (err) {
       res.status(500).json({ error: String(err) });
@@ -2342,7 +2361,7 @@ export function createWebServer(port: number): void {
   app.post("/api/emails/pool/next", (req: Request, res: Response) => {
     try {
       const pool = getEmailPool(config.output.dir);
-      const acc = pool.acquire();
+      const acc = pool.peek();
       res.json({ ok: true, email: acc?.address ?? null, useCount: acc?.useCount ?? 0 });
     } catch (err) {
       res.status(500).json({ error: String(err) });

@@ -26,6 +26,7 @@ import type { AdResult, Device } from "./types.js";
 import { logger } from "./logger.js";
 import { jitterDelay, sleep } from "./util/time.js";
 import { browseSerpNaturally } from "./click/behavior.js";
+import { deviceOfProfile } from "./click/pool.js";
 import { personaFor } from "./util/persona.js";
 
 /** How many different IPs to try for a keyword that hard-blocks (global default). */
@@ -223,6 +224,11 @@ interface DevicePool {
   proxies: Map<string, CaptchaProxy>;
   /** user_id → AdsPower display name (for persona + logs). */
   nameById: Map<string, string>;
+  /**
+   * user_id → device LABEL (name prefix). A flex profile's label differs from
+   * the leg it runs in; ip_trust.device must store this label, not the leg.
+   */
+  labelById: Map<string, Device>;
 }
 
 /** Load the set of profile names that passed the proxy health check. If the file is missing, allow all profiles. */
@@ -334,20 +340,50 @@ async function resolvePool(
   config: AppConfig,
   onlyProfileNames: Set<string> | null,
   store: Store | null = null
-): Promise<DevicePool & { nameById: Map<string, string> }> {
-  const empty = { ids: [] as string[], proxies: new Map<string, CaptchaProxy>(), nameById: new Map<string, string>() };
-  const toPool = (profiles: ProfileSummary[]) => {
+): Promise<DevicePool> {
+  const empty: DevicePool = {
+    ids: [] as string[],
+    proxies: new Map<string, CaptchaProxy>(),
+    nameById: new Map<string, string>(),
+    labelById: new Map<string, Device>(),
+  };
+  const labelOf = (name: string): Device =>
+    deviceOfProfile(name, config.scan.profilePrefix, config.scan.mobileProfilePrefix) ?? device;
+  const toPool = (profiles: ProfileSummary[], flexCandidates: ProfileSummary[] = []): DevicePool => {
     const capped = applyActivePoolCap(profiles, config, onlyProfileNames, store);
-    const ids = capped.map((p) => p.user_id);
+    // Device-flex: slots left empty by the own-label pool (cap unchanged) are
+    // filled with other-label profiles so the fleet never idles on a leg.
+    // Emulation follows the leg (mobile leg → CDP mobile emulation), so a
+    // desktop-labeled profile can scan the mobile SERP. Second choice only —
+    // never displaces an available own-label profile. Explicit --only list is
+    // never flexed (protect mode pins exact profiles).
+    const max = config.scan.maxProfilesPerDevice ?? 0;
+    let flexed: ProfileSummary[] = [];
+    if (!onlyProfileNames && max > 0 && capped.length < max && flexCandidates.length > 0) {
+      const cooled = filterVaultCooldown(flexCandidates, null, store);
+      shuffleInPlace(cooled);
+      flexed = cooled.slice(0, max - capped.length);
+    }
+    const all = [...capped, ...flexed];
+    const ids = all.map((p) => p.user_id);
     shuffleInPlace(ids);
     const proxies = new Map<string, CaptchaProxy>();
     const nameById = new Map<string, string>();
-    for (const p of capped) {
+    const labelById = new Map<string, Device>();
+    for (const p of all) {
       const cp = captchaProxyFromProfile(p);
       if (cp) proxies.set(p.user_id, cp);
-      nameById.set(p.user_id, p.name ?? p.user_id);
+      const name = p.name ?? p.user_id;
+      nameById.set(p.user_id, name);
+      labelById.set(p.user_id, labelOf(name));
     }
-    return { ids, proxies, nameById };
+    if (flexed.length > 0) {
+      logger.info(
+        { device, own: capped.length, flex: flexed.map((p) => p.name), max },
+        "scan pool: flex profiles filling empty slots (label != leg — emulation follows leg)"
+      );
+    }
+    return { ids, proxies, nameById, labelById };
   };
 
   if (!config.scan.rotateProfiles && !onlyProfileNames) {
@@ -360,10 +396,11 @@ async function resolvePool(
     } catch {
       /* fall through */
     }
-    return { ids: [id], proxies: new Map(), nameById: new Map([[id, id]]) };
+    return { ids: [id], proxies: new Map(), nameById: new Map([[id, id]]), labelById: new Map([[id, device]]) };
   }
 
   const prefix = device === "mobile" ? config.scan.mobileProfilePrefix : config.scan.profilePrefix;
+  const otherPrefix = device === "mobile" ? config.scan.profilePrefix : config.scan.mobileProfilePrefix;
   const cleanNames = onlyProfileNames ?? loadCleanProfileNames();
   try {
     const profiles = await ads.listProfiles();
@@ -372,14 +409,24 @@ async function resolvePool(
       if (onlyProfileNames) return onlyProfileNames.has(name);
       return name.startsWith(prefix) && (cleanNames === null || cleanNames.has(name));
     });
+    // Flex candidates: the OTHER device label, same cleanliness bar.
+    const flexCandidates = onlyProfileNames
+      ? []
+      : profiles.filter((p) => {
+          const name = p.name ?? "";
+          return !name.startsWith(prefix) && name.startsWith(otherPrefix) && (cleanNames === null || cleanNames.has(name));
+        });
     if (onlyProfileNames && matched.length === 0) {
       logger.warn({ device, wanted: [...onlyProfileNames] }, "no profiles matched --only-profiles list");
     }
-    if (cleanNames && !onlyProfileNames && matched.length === 0) {
+    if (cleanNames && !onlyProfileNames && matched.length === 0 && flexCandidates.length === 0) {
       logger.warn({ device, prefix }, "no clean profiles for device after proxy-status filter");
     }
-    if (matched.length) {
-      const pool = toPool(matched);
+    if (matched.length || flexCandidates.length) {
+      if (matched.length === 0) {
+        logger.info({ device, flex: flexCandidates.length }, "no own-label profiles — scan pool is fully flex (other label, emulation follows leg)");
+      }
+      const pool = toPool(matched, flexCandidates);
       logger.info(
         {
           device,
@@ -387,6 +434,7 @@ async function resolvePool(
           withProxy: pool.proxies.size,
           only: !!onlyProfileNames,
           maxPerDevice: config.scan.maxProfilesPerDevice,
+          flex: pool.ids.filter((id) => (pool.labelById.get(id) ?? device) !== device).length,
           names: [...pool.nameById.values()],
         },
         "device pool ready (with AdsPower proxy map)"
@@ -400,7 +448,9 @@ async function resolvePool(
   }
   if (onlyProfileNames) return empty;
   const id = config.profiles[device];
-  return id ? { ids: [id], proxies: new Map(), nameById: new Map([[id, id]]) } : empty;
+  return id
+    ? { ids: [id], proxies: new Map(), nameById: new Map([[id, id]]), labelById: new Map([[id, device]]) }
+    : empty;
 }
 
 export interface ScannedAd {
@@ -731,6 +781,10 @@ async function runDeviceScan(
           await session.clearProfileData({ preserveGoogleTrust: true });
           logger.info({ device, profileId: candidate, preserveGoogleTrust: true }, "profile data cleared (trust preserved)");
         }
+        // Device LABEL (name prefix), not the leg this profile may be flexed
+        // into: ip_trust.device stores the label; the leg is recorded per row.
+        const labelDevice = pool.labelById.get(candidate) ?? device;
+        const isFlex = labelDevice !== device;
         // Vault restore: durable trust across days (not only in-browser preserve).
         if (config.captcha.enabled) {
           const trust = ctx.store.ipTrust.get(candidate);
@@ -740,7 +794,7 @@ async function runDeviceScan(
           ctx.store.ipTrust.upsertMeta({
             profileId: candidate,
             name: pool.nameById.get(candidate) || candidate,
-            device,
+            device: labelDevice,
             proxyHost: pool.proxies.get(candidate)?.exitIp ?? "",
           });
         }
@@ -792,6 +846,8 @@ async function runDeviceScan(
           {
             device,
             profileId: candidate,
+            flex: isFlex,
+            labelDevice,
             hasProxy: !!px,
             proxytype: px?.proxytype,
             exitIp: px?.exitIp,
@@ -800,12 +856,15 @@ async function runDeviceScan(
             trustMethod: warm.method,
             captchaSolved: warm.captchaSolved,
           },
-          "profile ready (session safe via trend)"
+          isFlex
+            ? `profile ready — FLEX: ${labelDevice}-labeled profile working ${device} leg (emulation follows leg)`
+            : "profile ready (session safe via trend)"
         );
         onProgress?.({
           type: "profile-ready",
           device,
           profileId: candidate,
+          flex: isFlex,
           trend: warm.trend,
           trustMethod: warm.method,
         });

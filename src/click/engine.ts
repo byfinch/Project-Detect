@@ -284,6 +284,11 @@ interface DeviceEngineInput {
   targets: ClickTarget[];
   profileIds: string[];
   concurrency: number;
+  /**
+   * Device-flex: other-label profiles filling empty slots in this leg
+   * (label != leg). Bookkeeping only — counters stay per leg.
+   */
+  flexProfileIds?: Set<string>;
 }
 
 /** Run click jobs for a single device pool with round-robin target rotation. */
@@ -344,6 +349,7 @@ async function runDeviceClickEngine(
   const deviceQueued = pending.length;
   /** Locked total for this whole run — never grow with requeues / never shrink mid-run. */
   const lockedTotal = Math.max(1, ctx.fixedTotalJobs ?? deviceQueued);
+  const flexCount = input.flexProfileIds?.size ?? 0;
 
   safeProgress({
     type: "click-queue-ready",
@@ -352,8 +358,9 @@ async function runDeviceClickEngine(
     queued: deviceQueued,
     concurrency,
     profiles: profileIds.length,
+    flex: flexCount,
     total: lockedTotal,
-    message: `kuyruk hazır · ${device} · ${deviceQueued} iş (total kilit=${lockedTotal}) · conc=${concurrency}`,
+    message: `kuyruk hazır · ${device} · ${deviceQueued} iş (total kilit=${lockedTotal}) · conc=${concurrency}${flexCount > 0 ? ` · flex ${flexCount}` : ""}`,
   });
 
   const runningProfiles = new Set<string>();
@@ -676,6 +683,7 @@ async function runDeviceClickEngine(
           jobId: job.id,
           profileId: job.profileId,
           device: job.device,
+          flex: input.flexProfileIds?.has(job.profileId) ?? false,
           target: job.targetDomain,
           status: result.status,
           completed: g.completed,
@@ -943,34 +951,58 @@ export async function runClickEngine(
     const { pools } = selectPools(target, allProfileIds, config.scan.profilePrefix, config.scan.mobileProfilePrefix);
 
     for (const pool of pools) {
-      let ids = allProfiles
-        .filter((p) => pool.profileIds.includes(p.name || p.user_id))
-        .map((p) => p.user_id);
-
-      // Frequency/cooldown filter BEFORE shuffle+cap so cooled profiles don't eat pool slots.
-      const beforeFilter = ids.length;
-      ids = ids.filter((id) => {
+      // Device-flex: own-label profiles are the primary pool; profiles carrying
+      // the OTHER device label fill empty slots so a single-device campaign
+      // never strands half the fleet. Emulation follows the LEG (mobile leg →
+      // CDP mobile emulation in the worker), never the label, so a
+      // desktop-labeled profile can work a mobile leg. ip_trust.device keeps
+      // the LABEL; the leg is recorded per job (job.device).
+      // Frequency/cooldown guards apply equally to both groups.
+      const passesGuards = (id: string): boolean => {
         if (coolingProfiles.has(id)) return false;
         if (store.countRecentSuccesses(id, target.domain, hourAgoIso) >= perProfileHourCap) return false;
         const last = store.lastSuccessAt(id, target.domain);
         if (last && Date.now() - new Date(last).getTime() < cooldownMs) return false;
         return true;
-      });
-      const filtered = beforeFilter - ids.length;
+      };
+      const ownNames = new Set(pool.profileIds);
+      const ownIds = allProfiles
+        .filter((p) => ownNames.has(p.name || p.user_id))
+        .map((p) => p.user_id)
+        .filter(passesGuards);
+      // Flex candidates: known device label, different from this leg.
+      const flexIds = allProfiles
+        .filter((p) => {
+          const key = p.name || p.user_id;
+          if (ownNames.has(key)) return false;
+          const label = deviceOfProfile(key, config.scan.profilePrefix, config.scan.mobileProfilePrefix);
+          return label !== null && label !== pool.device;
+        })
+        .map((p) => p.user_id)
+        .filter(passesGuards);
+      const filtered = pool.profileIds.length - ownIds.length;
       if (filtered > 0) {
         logger.info(
-          { device: pool.device, domain: target.domain, filtered, remaining: ids.length, perProfileHourCap, cooldownMin: engineConfig.sameAdCooldownMinutes },
+          { device: pool.device, domain: target.domain, filtered, remaining: ownIds.length, perProfileHourCap, cooldownMin: engineConfig.sameAdCooldownMinutes },
           "click pool: profiles cooling (frequency cap / same-ad cooldown)"
         );
       }
 
-      // Shuffle then cap so we rotate which 5 of 50 are active.
-      for (let i = ids.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [ids[i], ids[j]] = [ids[j]!, ids[i]!];
-      }
+      // Shuffle WITHIN each group only: own-label keeps priority, flex is the
+      // second-choice tail (natural look first). Cap applies to the joined list.
+      shuffleInPlace(ownIds);
+      shuffleInPlace(flexIds);
+      const ownSet = new Set(ownIds);
+      let ids = [...ownIds, ...flexIds];
       if (clickCap > 0 && ids.length > clickCap) {
         ids = ids.slice(0, clickCap);
+      }
+      const flexPicked = new Set(ids.filter((id) => !ownSet.has(id)));
+      if (flexPicked.size > 0) {
+        logger.info(
+          { device: pool.device, domain: target.domain, flex: flexPicked.size, own: ids.length - flexPicked.size },
+          "click pool: flex profiles filling empty slots (label != leg — emulation follows leg)"
+        );
       }
 
       const existing = deviceInputs.get(pool.device);
@@ -984,6 +1016,9 @@ export async function runClickEngine(
         }
         if (clickCap > 0 && merged.length > clickCap) merged = merged.slice(0, clickCap);
         existing.profileIds = merged;
+        // Flex bookkeeping must survive the merge + re-cap.
+        const priorFlex = existing.flexProfileIds ?? new Set<string>();
+        existing.flexProfileIds = new Set(merged.filter((id) => priorFlex.has(id) || flexPicked.has(id)));
         existing.targets.push(target);
       } else {
         deviceInputs.set(pool.device, {
@@ -991,6 +1026,7 @@ export async function runClickEngine(
           targets: [target],
           profileIds: ids,
           concurrency: 0, // assigned below
+          flexProfileIds: flexPicked,
         });
       }
     }

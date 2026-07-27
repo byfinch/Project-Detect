@@ -453,6 +453,7 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
             const acc = acquireReportEmail(outputDir, {
               enabled: config.report.emailPool.enabled,
               minSize: config.report.emailPool.minSize,
+              refillPerHour: config.report.emailPool.refillPerHour,
               fallback: config.report.reportEmail,
             });
             const res = await fillReportForm(page, {

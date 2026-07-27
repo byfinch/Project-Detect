@@ -209,7 +209,9 @@ const ConfigSchema = z.object({
         .object({
           enabled: z.boolean().default(true),
           /** Refill target: keep this many active addresses. */
-          minSize: z.number().int().nonnegative().default(10),
+          minSize: z.number().int().nonnegative().default(500),
+          /** Max new accounts created per hour (mail.tm rate-limit safety). */
+          refillPerHour: z.number().int().positive().default(40),
         })
         .default({}),
     })
@@ -370,7 +372,8 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       reportEmail: process.env.REPORT_EMAIL || file.report?.reportEmail || "",
       emailPool: {
         enabled: file.report?.emailPool?.enabled ?? true,
-        minSize: file.report?.emailPool?.minSize ?? 10,
+        minSize: file.report?.emailPool?.minSize ?? 500,
+        refillPerHour: file.report?.emailPool?.refillPerHour ?? 40,
       },
     },
     bettingKeywords: file.bettingKeywords ?? [],

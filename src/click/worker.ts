@@ -362,6 +362,7 @@ export async function maybeReportAdBeforeClick(
     const acc = acquireReportEmail(ctx.outputDir, {
       enabled: ctx.config.report.emailPool.enabled,
       minSize: ctx.config.report.emailPool.minSize,
+      refillPerHour: ctx.config.report.emailPool.refillPerHour,
       fallback: ctx.config.report.reportEmail,
     });
     const res = await fillReportForm(page, task, true, evidenceDir, acc.email || undefined);

@@ -192,7 +192,9 @@ export class IpTrustStore {
 
   saveTrustCookies(profileId: string, cookies: TrustCookie[]): void {
     const now = new Date().toISOString();
-    this.upsertMeta({ profileId, name: profileId, device: "desktop" });
+    // Keep the stored device LABEL (name prefix) — never clobber it here; with
+    // device-flex the leg a profile runs in can differ from its label.
+    this.upsertMeta({ profileId, name: profileId, device: this.get(profileId)?.device ?? "desktop" });
     this.db
       .prepare(`UPDATE ip_trust SET trust_cookies_json = ?, updated_at = ? WHERE profile_id = ?`)
       .run(JSON.stringify(cookies), now, profileId);
@@ -201,7 +203,8 @@ export class IpTrustStore {
   /** SERP OK without needing a solve this session. */
   markClean(profileId: string, cookies?: TrustCookie[]): void {
     const now = new Date().toISOString();
-    this.upsertMeta({ profileId, name: profileId, device: "desktop" });
+    // Keep the stored device LABEL (name prefix) — see saveTrustCookies.
+    this.upsertMeta({ profileId, name: profileId, device: this.get(profileId)?.device ?? "desktop" });
     if (cookies?.length) {
       this.db
         .prepare(

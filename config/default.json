@@ -111,7 +111,8 @@
     "reportEmail": "ho6y2cyg1h@lnovic.com",
     "emailPool": {
       "enabled": true,
-      "minSize": 250
+      "minSize": 500,
+      "refillPerHour": 40
     }
   },
   "bettingKeywords": [
