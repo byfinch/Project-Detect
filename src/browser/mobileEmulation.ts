@@ -34,6 +34,11 @@ const UA_METADATA = {
  * Force phone-like browsing for TR-MOBILE profiles:
  * viewport + touch + Mobile UA + Client Hints (mobile:true).
  * Call after BrowserSession.attach, before any Google navigation.
+ *
+ * NOTE: Emulation.setTouchEmulationEnabled (below) gives a realistic
+ * navigator.maxTouchPoints=5, but Playwright's page.touchscreen.tap still
+ * refuses on connectOverCDP attaches ("hasTouch must be enabled" — the
+ * context option cannot be set post-hoc). Use tapMobile() for taps.
  */
 export async function applyMobileEmulation(page: Page): Promise<void> {
   await page.setViewportSize(MOBILE_VIEWPORT).catch(() => {});
@@ -94,4 +99,39 @@ export async function applyMobileEmulation(page: Page): Promise<void> {
   } catch {
     /* page may not be ready */
   }
+}
+
+/**
+ * Tap a point on a touch-emulated page (mobile SERP app cards answer TAP,
+ * not mouse events). Chain: page.touchscreen.tap → raw CDP
+ * Input.dispatchTouchEvent (works on connectOverCDP attaches where
+ * Playwright's hasTouch context option is off) → mouse sequence.
+ */
+export async function tapMobile(page: Page, x: number, y: number): Promise<void> {
+  try {
+    await page.touchscreen.tap(x, y);
+    return;
+  } catch {
+    /* hasTouch off on attached contexts — CDP fallback below */
+  }
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    try {
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x, y, radiusX: 2.5, radiusY: 2.5, force: 1, id: 1 }],
+      });
+      await new Promise((r) => setTimeout(r, 50 + Math.random() * 70));
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    } finally {
+      await cdp.detach().catch(() => {});
+    }
+    return;
+  } catch {
+    /* fall through to the mouse sequence */
+  }
+  await page.mouse.move(x, y, { steps: 8 }).catch(() => {});
+  await page.mouse.down().catch(() => {});
+  await new Promise((r) => setTimeout(r, 60 + Math.random() * 80));
+  await page.mouse.up().catch(() => {});
 }

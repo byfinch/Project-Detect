@@ -3,6 +3,7 @@ import type { AppConfig } from "../config.js";
 import { BrowserSession } from "../browser/session.js";
 import { markProfileInUse, releaseProfile } from "../browser/profileRegistry.js";
 import { AdsPowerClient, captchaProxyFromProfile, type ProfileSummary } from "../adspower/client.js";
+import { tapMobile } from "../browser/mobileEmulation.js";
 import { buildSerpUrl, gotoSerp, prepareGoogleConsent, warmUp } from "../google/serp.js";
 import { parseAds } from "../google/adParser.js";
 import { resolveLanding } from "../resolve/redirectResolver.js";
@@ -749,6 +750,12 @@ export async function clickAndReportAd(
             link = headingLink || c.querySelector("a[href]");
           }
           if (!link) return null;
+          // Tag for the click-time re-read: Google re-renders app cards
+          // after first paint — the settle check below catches stale/detach.
+          for (const el of Array.from(document.querySelectorAll("[data-detect-anchor]"))) {
+            el.removeAttribute("data-detect-anchor");
+          }
+          link.setAttribute("data-detect-anchor", "1");
           // Isolation (app targets): fire the aclk→intent chain in a NEW tab
           // so it can never kill/freeze the SERP tab (live: ~50% tab death).
           if (newTab) link.setAttribute("target", "_blank");
@@ -772,16 +779,7 @@ export async function clickAndReportAd(
       // no-chain clicks). No hover on mobile (meaningless); tap alone.
       // Bounded: input ops hang forever on a frozen renderer.
       if (device === "mobile") {
-        await Promise.race([
-          page.touchscreen.tap(anchorPos.x, anchorPos.y).catch(async () => {
-            // Touchscreen unsupported on this context → mouse fallback.
-            await page.mouse.move(anchorPos.x, anchorPos.y, { steps: 8 }).catch(() => {});
-            await page.mouse.down().catch(() => {});
-            await sleep(60 + Math.random() * 80);
-            await page.mouse.up().catch(() => {});
-          }),
-          sleep(10_000),
-        ]);
+        await Promise.race([tapMobile(page, anchorPos.x, anchorPos.y), sleep(10_000)]);
       } else {
         await Promise.race([
           (async () => {
@@ -799,7 +797,39 @@ export async function clickAndReportAd(
       return pages.length > pagesBefore ? pages[pages.length - 1]! : page;
     };
 
-    let cardAnchor = await locateCardAnchor();
+    /**
+     * Re-read the tagged anchor's rect AT CLICK TIME. Google re-renders app
+     * cards after first paint — a stale rect or detached element silently
+     * wastes the click (live: ~50% no-chain fails).
+     */
+    const reReadAnchor = (): Promise<{ x: number; y: number } | null> =>
+      Promise.race([
+        page.evaluate(() => {
+          const el = document.querySelector("[data-detect-anchor]") as HTMLElement | null;
+          if (!el || !el.isConnected) return null;
+          el.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
+          const r = el.getBoundingClientRect();
+          if (r.width === 0) return null;
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        }).catch(() => null),
+        sleep(8_000).then(() => null),
+      ]);
+
+    /**
+     * Locate → ~600ms settle → fresh rect at click time. Detached/moved
+     * anchor → ONE fast re-locate (separate from the full retry loop).
+     */
+    const locateAndSettle = async (): Promise<CardAnchor | null> => {
+      const first = await locateCardAnchor();
+      if (!first) return null;
+      await sleep(450 + Math.random() * 300);
+      const fresh = await reReadAnchor();
+      if (fresh) return { ...fresh, playHref: first.playHref };
+      logger.debug({ jobId: jobForRecord.id, domain: currentAd.displayDomain }, "card anchor stale after settle — one fast re-locate");
+      return locateCardAnchor();
+    };
+
+    let cardAnchor = await locateAndSettle();
 
     let landingPage: Page = page;
     if (cardAnchor) {
@@ -900,7 +930,7 @@ export async function clickAndReportAd(
     if (isAppAdTarget && !landed && !aclkWatch?.sawClickProof() && landingPage === page && onSerp(page.url())) {
       logger.warn({ jobId: jobForRecord.id, domain: currentAd.displayDomain }, "app ad: no click proof — retrying click once on the same impression");
       await dismissOverlayDialog();
-      const retryAnchor = await locateCardAnchor();
+      const retryAnchor = await locateAndSettle();
       if (retryAnchor) {
         landingPage = await mouseClickCard(retryAnchor);
         if (clickInNewTab && landingPage !== page) {

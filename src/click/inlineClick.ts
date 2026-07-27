@@ -16,6 +16,7 @@ import { openReportUi, fillReportForm } from "../report/autoSerpReport.js";
 import { appAdPackage, isAppInstallAd } from "../util/appAds.js";
 import { watchAclkRequests, type AclkWatch } from "./aclkWatch.js";
 import { restoreSerp } from "./serpRestore.js";
+import { tapMobile } from "../browser/mobileEmulation.js";
 
 export interface InlineAdTarget {
   title: string;
@@ -88,7 +89,8 @@ async function findAnchor(page: Page, ad: InlineAdTarget, newTab = false, useTou
   // Play app cards all share play.google.com — for app ads match by title
   // only, and carry the card's Play href out for package-id extraction.
   const isApp = isAppInstallAd(ad.displayDomain, ad.adHref);
-  const box = await page.evaluate(
+  const evalOnce = () =>
+    page.evaluate(
     ({ target, titleHint, isApp, newTab }) => {
       const norm = (s: string) => s.toLowerCase().replace(/^(www\.|m\.)/, "").trim();
       const cards = Array.from(
@@ -131,6 +133,12 @@ async function findAnchor(page: Page, ad: InlineAdTarget, newTab = false, useTou
           link = headingLink || c.querySelector("a[href]");
         }
         if (!link) return null;
+        // Tag for the click-time re-read: Google re-renders app cards after
+        // first paint — the settle check below catches stale/detach.
+        for (const el of Array.from(document.querySelectorAll("[data-detect-anchor]"))) {
+          el.removeAttribute("data-detect-anchor");
+        }
+        link.setAttribute("data-detect-anchor", "1");
         // Isolation (app targets): fire the aclk→intent chain in a NEW tab
         // so it can never kill/freeze the SERP tab.
         if (newTab && isApp) link.setAttribute("target", "_blank");
@@ -148,20 +156,31 @@ async function findAnchor(page: Page, ad: InlineAdTarget, newTab = false, useTou
       newTab,
     }
   ).catch(() => null);
+  let box = await evalOnce();
+  if (box) {
+    // Google re-renders app cards after first paint — settle ~600ms, then
+    // re-read the rect AT CLICK TIME; a stale/detached anchor silently
+    // wastes the click (live: ~50% no-chain fails). One fast re-locate.
+    await sleep(450 + Math.floor(Math.random() * 300));
+    const fresh = await page.evaluate(() => {
+      const el = document.querySelector("[data-detect-anchor]") as HTMLElement | null;
+      if (!el || !el.isConnected) return null;
+      el.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
+      const r = el.getBoundingClientRect();
+      if (r.width === 0) return null;
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    }).catch(() => null);
+    box = fresh ? { ...fresh, playHref: box.playHref } : await evalOnce();
+  }
   if (box) {
     return {
       playHref: box.playHref,
       click: async () => {
-        // Mobile SERP app cards answer TAP, not mouse events — Playwright
-        // mouse on a touch page fires no reliable aclk chain. No hover on
-        // mobile; tap alone, mouse fallback when touch is unsupported.
+        // Mobile SERP app cards answer TAP, not mouse events. tapMobile
+        // chains touchscreen.tap → CDP dispatchTouchEvent → mouse fallback.
         if (useTouch) {
-          try {
-            await page.touchscreen.tap(box.x, box.y);
-            return;
-          } catch {
-            /* touchscreen unsupported — mouse fallback below */
-          }
+          await tapMobile(page, box.x, box.y);
+          return;
         }
         await page.mouse.move(box.x, box.y, { steps: 8 });
         await page.mouse.down();
