@@ -424,8 +424,12 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
     logger.debug({ profile: profileKey, persona: personaFor(profileKey).label }, "click persona");
     evidence.preClickMs = await preClickBrowse(page, job.device, personaBehavior);
 
-    // 4. Parse ads and find target.
-    const ads = await parseAds(page);
+    // 4. Parse ads and find target. Bounded — a wedged renderer here used to
+    // hang the slot until the 8m reaper.
+    const ads = await Promise.race([
+      parseAds(page),
+      sleep(20_000).then(() => [] as Awaited<ReturnType<typeof parseAds>>),
+    ]);
     let targetAd = matchAd(ads, job.targetDomain, job.targetTitle, job.fallbackFirstAd);
     // Diagnose "target ad not found" waves: did the SERP have no ads at all
     // (ad simply not served to this IP/device) or did we fail to match it?
@@ -529,24 +533,11 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
       // (timeout/freeze) must not rewrite this as "error".
       ctx.store.upsertReportOutcome(ctx.runId, jobForRecord, rep);
 
-      // Dismiss the "Reklam Merkezim" overlay the report flow leaves open —
-      // the click phase needs a clean SERP DOM (no reload: same-impression rule).
-      await page.keyboard.press("Escape").catch(() => {});
-      await sleep(400);
-      await page.evaluate(() => {
-        const btns = Array.from(
-          document.querySelectorAll('[role="dialog"] [aria-label*="kapat" i], [role="dialog"] [aria-label*="close" i]')
-        ) as HTMLElement[];
-        for (const b of btns) {
-          if (b.getBoundingClientRect().width > 0) b.click();
-        }
-      }).catch(() => {});
-
-      // Renderer liveness probe (5s): the report flow (or an intent:// redirect
-      // from a previous ad) can leave the renderer frozen — every later call
-      // then burns its own cap and the job dies as "failed" after minutes
-      // (seen live on the app:casibom mobile leg). Report is already out;
-      // skip the click cheaply instead of wedging the slot.
+      // Renderer liveness probe (5s) BEFORE any other page call: the report
+      // flow (or an intent:// redirect) can leave the renderer frozen — even
+      // the Escape/dismiss below would then hang the slot until the 8m reaper
+      // (11 jobs died exactly like this in one app-ad campaign). The report is
+      // already persisted; skip the click cheaply instead of wedging.
       const rendererAlive = await Promise.race([
         page.evaluate(() => 1).then(() => true, () => false),
         sleep(5_000).then(() => false),
@@ -556,10 +547,34 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
         return { status: "skipped", error: "renderer frozen before click (intent redirect?)", evidence: ev, reportResult: rep };
       }
 
-      // aclkFired: Google registers the click the moment the aclk is followed —
-      // a landing error afterwards does NOT un-click it (and must still count).
+      // Dismiss the "Reklam Merkezim" overlay the report flow leaves open —
+      // the click phase needs a clean SERP DOM (no reload: same-impression
+      // rule). Bounded: keyboard/evaluate hang on a slow renderer.
+      await Promise.race([
+        (async () => {
+          await page.keyboard.press("Escape").catch(() => {});
+          await sleep(400);
+          await page.evaluate(() => {
+            const btns = Array.from(
+              document.querySelectorAll('[role="dialog"] [aria-label*="kapat" i], [role="dialog"] [aria-label*="close" i]')
+            ) as HTMLElement[];
+            for (const b of btns) {
+              if (b.getBoundingClientRect().width > 0) b.click();
+            }
+          }).catch(() => {});
+        })(),
+        sleep(6_000),
+      ]);
+
+      // aclkFired: the mouse event happened. clickLanded: the browser actually
+      // LEFT the SERP — without it, "success" is fake (landing=SERP evidence).
       let aclkFired = false;
+      let clickLanded = false;
       try {
+        // Play app cards all share the play.google.com display domain — a
+        // domain-only card match can click a DIFFERENT app's ad. Match app
+        // targets by title, and extract the Play package href from the card.
+        const isAppAdTarget = isAppInstallAd(currentAd.displayDomain, currentAd.adHref);
         // Locate the anchor — card-scoped first (same matching as the report
         // opener): find the target ad card, click its primary link. The old
         // title-text / aclk-href heuristics miss desktop cards entirely
@@ -568,7 +583,7 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
         // still freeze mid-flight — an unbounded evaluate hangs the slot.
         const cardAnchor = await Promise.race([
           page.evaluate(
-          ({ target, titleHint }) => {
+          ({ target, titleHint, isApp }) => {
             const norm = (s: string) => s.toLowerCase().replace(/^(www\.|m\.)/, "").trim();
             const cards = Array.from(
               document.querySelectorAll("[data-text-ad], #tads [data-hveid], #tadsb [data-hveid], #tvcap [data-hveid], [data-pcu]")
@@ -585,22 +600,25 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
                 }
               }
               const cardText = (c.textContent || "").toLowerCase();
-              const isTarget =
-                (dd && norm(dd) === target) ||
-                (titleHint && title.toLowerCase().includes(titleHint.toLowerCase())) ||
-                cardText.includes(target);
+              const isTarget = isApp
+                ? !!(titleHint && title.toLowerCase().includes(titleHint.toLowerCase()))
+                : ((dd && norm(dd) === target) ||
+                   (titleHint && title.toLowerCase().includes(titleHint.toLowerCase())) ||
+                   cardText.includes(target));
               if (!isTarget) continue;
               const headingLink = heading?.closest("a") as HTMLAnchorElement | null;
               const link = (headingLink || c.querySelector("a[href]")) as HTMLAnchorElement | null;
               if (!link) return null;
+              const playLink = c.querySelector('a[href*="play.google.com"], a[href^="intent://"]') as HTMLAnchorElement | null;
+              const playHref = playLink?.href ?? null;
               link.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
               const r = link.getBoundingClientRect();
               if (r.width === 0) return null;
-              return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+              return { x: r.x + r.width / 2, y: r.y + r.height / 2, playHref };
             }
             return null;
           },
-          { target: currentAd.displayDomain.toLowerCase().replace(/^(www\.|m\.)/, ""), titleHint: currentAd.title?.slice(0, 60) ?? "" }
+          { target: currentAd.displayDomain.toLowerCase().replace(/^(www\.|m\.)/, ""), titleHint: (currentAd.title ?? "").slice(0, isAppAdTarget ? 25 : 60), isApp: isAppAdTarget }
           ).catch(() => null),
           sleep(15_000).then(() => null),
         ]);
@@ -608,10 +626,16 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
         let landingPage: Page = page;
         if (cardAnchor) {
           const pagesBefore = page.context().pages().length;
-          await page.mouse.move(cardAnchor.x, cardAnchor.y, { steps: 8 }).catch(() => {});
-          await page.mouse.down().catch(() => {});
-          await sleep(60 + Math.random() * 80);
-          await page.mouse.up().catch(() => {});
+          // Bounded: mouse ops hang forever on a frozen renderer.
+          await Promise.race([
+            (async () => {
+              await page.mouse.move(cardAnchor.x, cardAnchor.y, { steps: 8 }).catch(() => {});
+              await page.mouse.down().catch(() => {});
+              await sleep(60 + Math.random() * 80);
+              await page.mouse.up().catch(() => {});
+            })(),
+            sleep(10_000),
+          ]);
           aclkFired = true;
           await sleep(1800);
           const pages = page.context().pages();
@@ -659,23 +683,48 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
         await landingPage.waitForLoadState("domcontentloaded", { timeout: 20000 }).catch(() => {});
         ev.landingUrl = landingPage.url();
 
-        // Play app ads: the aclk/intent chain ends at intent://play.google.com —
-        // a browser cannot open the intent protocol (and mobile emulation freezes
-        // on the "open in app" flow). The CLICK is already registered by Google
-        // (aclk fired); for landing evidence + stay, take the HTTPS Play page
-        // (what an app-less user sees) via the package id.
-        if (
-          ev.landingUrl.startsWith("intent:") ||
-          (currentAd.adHref?.startsWith("intent://") && ev.landingUrl.includes("google."))
-        ) {
-          const pkg =
-            appAdPackage(currentAd.adHref) ?? appAdPackage(ev.landingUrl);
-          if (pkg) {
-            const playUrl = `https://play.google.com/store/apps/details?id=${pkg}&hl=tr&gl=tr`;
-            logger.info({ jobId: jobForRecord.id, pkg }, "app ad: intent landing — navigating to HTTPS Play page for evidence");
-            await landingPage.goto(playUrl, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
-            ev.landingUrl = landingPage.url();
+        // Did the click actually navigate anywhere? aclkFired only means the
+        // mouse event happened — a blocked navigation (JS card, intent://) can
+        // leave the page sitting on the SERP, and counting that as success
+        // produced fake clicks with landing=SERP (seen live on app:meritking).
+        const onSerp = (u: string) =>
+          u === evidence.serpUrl || /\/search[?#]/.test(u) || u.startsWith("intent:");
+        let landed = !onSerp(ev.landingUrl);
+
+        // Play app ads: the aclk chain ends at intent://play.google.com — a
+        // desktop browser cannot open the intent protocol, so the page usually
+        // stays on the SERP even though Google DID register the click. For
+        // landing evidence + stay, open the HTTPS Play page (what an app-less
+        // user sees). pkg from the ad href, the card DOM, or the landing URL.
+        const pkg = isAppAdTarget
+          ? appAdPackage(currentAd.adHref) ??
+            appAdPackage(cardAnchor?.playHref ?? null) ??
+            appAdPackage(ev.landingUrl)
+          : null;
+        if (pkg && !landed) {
+          const playUrl = `https://play.google.com/store/apps/details?id=${pkg}&hl=tr&gl=tr`;
+          logger.info({ jobId: jobForRecord.id, pkg }, "app ad: intent/stuck landing — navigating to HTTPS Play page for evidence");
+          await landingPage.goto(playUrl, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
+          ev.landingUrl = landingPage.url();
+          // The click target is the APP itself — no browser can render the true
+          // landing. The aclk was followed, so the click counts even if the
+          // Play page itself fails to load.
+          landed = true;
+          if (!/play\.google\.com/.test(ev.landingUrl)) {
+            logger.warn({ jobId: jobForRecord.id, url: ev.landingUrl.slice(0, 100) }, "app ad: Play page did not load — counting click without landing evidence");
           }
+        }
+        if (!pkg && !landed && !currentAd.isOrganic && currentAd.adHref && landingPage === page) {
+          // Web ad whose click never navigated (JS-blocked card): follow the
+          // aclk directly — that request IS the click Google registers.
+          logger.warn({ jobId: jobForRecord.id, domain: currentAd.displayDomain }, "click did not navigate — direct aclk goto fallback");
+          await page.goto(currentAd.adHref, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
+          ev.landingUrl = page.url();
+          landed = !onSerp(ev.landingUrl);
+        }
+        clickLanded = landed;
+        if (!landed) {
+          throw new Error("click did not leave the SERP (no navigation)");
         }
 
         // Cloudflare doğrulama kutusu (Turnstile checkbox) — tıkla / 2captcha.
@@ -744,11 +793,16 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
             ev.redirectHops = outcome.hops;
           } catch (resolveErr) {
             logger.debug({ jobId: jobForRecord.id, err: String(resolveErr) }, "landing resolve failed");
-            ev.finalUrl = landingPage.url();
-            try {
-              ev.finalDomain = new URL(landingPage.url()).hostname;
-            } catch {
-              ev.finalDomain = null;
+            const u = landingPage.url();
+            // Never record the SERP itself as "final landing" — that turned
+            // no-navigation clicks into fake evidence (seen on app:meritking).
+            if (!u.includes("/search?") && u !== evidence.serpUrl) {
+              ev.finalUrl = u;
+              try {
+                ev.finalDomain = new URL(u).hostname;
+              } catch {
+                ev.finalDomain = null;
+              }
             }
           }
         }
@@ -775,8 +829,9 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
           await sleep(1500);
         }
       } catch (clickErr) {
-        if (aclkFired) {
-          // Google saw the click — landing error is best-effort, not a failed click.
+        if (aclkFired && clickLanded) {
+          // Google saw the click AND we left the SERP — a later landing error
+          // (CF wall, resolve) is best-effort, not a failed click.
           st = "success";
           err = `landing failed after aclk: ${String(clickErr).slice(0, 120)}`;
           logger.warn({ jobId: jobForRecord.id, err }, "click fired but landing failed — counting as click");
@@ -806,7 +861,10 @@ export async function runClickJob(ctx: WorkerContext, job: ClickJob): Promise<Cl
           logger.info({ jobId: jobForRecord.id, domain: currentAd.displayDomain, prev: rep.status, retryNo }, "report retry on fresh impression");
           await page.goto(serpUrl, { waitUntil: "domcontentloaded", timeout: 25000 }).catch(() => {});
           await sleep(1200);
-          const retryAds = await parseAds(page);
+          const retryAds = await Promise.race([
+            parseAds(page),
+            sleep(15_000).then(() => [] as Awaited<ReturnType<typeof parseAds>>),
+          ]);
           // App ads share play.google.com — match the fresh SERP by app identity.
           const retryKey =
             appAdKey(currentAd.title, currentAd.adHref) ?? currentAd.displayDomain;
