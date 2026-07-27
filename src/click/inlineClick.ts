@@ -373,7 +373,7 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
       // findAnchor runs page.evaluate with NO protocol timeout — on a renderer
       // frozen by an intent:// redirect (Play app ads on mobile) it hangs
       // forever (seen live: 3 wedges). Cap it; null falls to the aclk fallback.
-      const anchor = await Promise.race([
+      let anchor = await Promise.race([
         findAnchor(page, ad),
         sleep(15_000).then(() => null),
       ]);
@@ -601,6 +601,57 @@ export async function clickAdsOnOpenSerp(opts: InlineClickOpts): Promise<InlineC
           // chain (aclk → intent) may still be in flight; bounded grace window.
           for (let i = 0; i < 10 && !aclkWatch?.sawClickProof(); i++) {
             await sleep(500);
+          }
+        }
+        // Same-impression retry (app ads only): the click attempt produced no
+        // proof (card rotated under the mouse / overlay stole the click). ONE
+        // bounded retry: dismiss overlays, re-locate the card, click again,
+        // re-wait the proof window. Runs BEFORE any landing step; a second
+        // failure takes the honest "no navigation" path below. The listener
+        // is event-based, so the retry feeds the same watch.
+        if (isAppAd && !landed && !aclkWatch?.sawClickProof() && landing === page && onSerp(page.url())) {
+          logger.warn({ domain, profileId }, "inline app ad: no click proof — retrying click once on the same impression");
+          await Promise.race([
+            (async () => {
+              await page.keyboard.press("Escape").catch(() => {});
+              await sleep(400);
+              await page.evaluate(() => {
+                const btns = Array.from(
+                  document.querySelectorAll('[role="dialog"] [aria-label*="kapat" i], [role="dialog"] [aria-label*="close" i]')
+                ) as HTMLElement[];
+                for (const b of btns) {
+                  if (b.getBoundingClientRect().width > 0) b.click();
+                }
+              }).catch(() => {});
+            })(),
+            sleep(6_000),
+          ]);
+          const retryAnchor = await Promise.race([
+            findAnchor(page, ad),
+            sleep(15_000).then(() => null),
+          ]);
+          if (retryAnchor) {
+            anchor = retryAnchor; // pkg extraction below prefers the fresh card
+            const retryPagesBefore = page.context().pages().length;
+            const [retryNewPage] = await Promise.all([
+              page.context().waitForEvent("page", { timeout: 18000 }).catch(() => null),
+              retryAnchor.click().catch(() => null),
+            ]);
+            landing = retryNewPage ?? page;
+            if (!retryNewPage) {
+              const pages = page.context().pages();
+              if (pages.length > retryPagesBefore) landing = pages[pages.length - 1]!;
+            }
+            await landing.waitForLoadState("domcontentloaded", { timeout: 20000 }).catch(() => {});
+            evidence.landingUrl = landing.url();
+            landed = !onSerp(evidence.landingUrl);
+            if (!landed) {
+              for (let i = 0; i < 10 && !aclkWatch?.sawClickProof(); i++) {
+                await sleep(500);
+              }
+            }
+          } else {
+            logger.warn({ domain, profileId }, "inline app ad retry: card no longer on SERP (rotated)");
           }
         }
         const aclkSeen = aclkWatch?.sawClickProof() ?? false;

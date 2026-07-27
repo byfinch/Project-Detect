@@ -621,21 +621,24 @@ export async function clickAndReportAd(
   // Dismiss the "Reklam Merkezim" overlay the report flow leaves open —
   // the click phase needs a clean SERP DOM (no reload: same-impression
   // rule). Bounded: keyboard/evaluate hang on a slow renderer.
-  await Promise.race([
-    (async () => {
-      await page.keyboard.press("Escape").catch(() => {});
-      await sleep(400);
-      await page.evaluate(() => {
-        const btns = Array.from(
-          document.querySelectorAll('[role="dialog"] [aria-label*="kapat" i], [role="dialog"] [aria-label*="close" i]')
-        ) as HTMLElement[];
-        for (const b of btns) {
-          if (b.getBoundingClientRect().width > 0) b.click();
-        }
-      }).catch(() => {});
-    })(),
-    sleep(6_000),
-  ]);
+  const dismissOverlayDialog = async (): Promise<void> => {
+    await Promise.race([
+      (async () => {
+        await page.keyboard.press("Escape").catch(() => {});
+        await sleep(400);
+        await page.evaluate(() => {
+          const btns = Array.from(
+            document.querySelectorAll('[role="dialog"] [aria-label*="kapat" i], [role="dialog"] [aria-label*="close" i]')
+          ) as HTMLElement[];
+          for (const b of btns) {
+            if (b.getBoundingClientRect().width > 0) b.click();
+          }
+        }).catch(() => {});
+      })(),
+      sleep(6_000),
+    ]);
+  };
+  await dismissOverlayDialog();
 
   // aclkFired: the mouse event happened. clickLanded: the browser actually
   // LEFT the SERP — without it, "success" is fake (landing=SERP evidence).
@@ -655,7 +658,9 @@ export async function clickAndReportAd(
     // ("could not locate anchor element" → report without click).
     // 15s race: the renderer probe passes, THEN an intent redirect can
     // still freeze mid-flight — an unbounded evaluate hangs the slot.
-    const cardAnchor = await Promise.race([
+    type CardAnchor = { x: number; y: number; playHref: string | null };
+    const locateCardAnchor = (): Promise<CardAnchor | null> =>
+      Promise.race([
       page.evaluate(
       ({ target, titleHint, isApp }) => {
         const norm = (s: string) => s.toLowerCase().replace(/^(www\.|m\.)/, "").trim();
@@ -697,13 +702,13 @@ export async function clickAndReportAd(
       sleep(15_000).then(() => null),
     ]);
 
-    let landingPage: Page = page;
-    if (cardAnchor) {
+    /** Mouse-click a located card; returns the landing page (new tab or same). */
+    const mouseClickCard = async (anchorPos: CardAnchor): Promise<Page> => {
       const pagesBefore = page.context().pages().length;
       // Bounded: mouse ops hang forever on a frozen renderer.
       await Promise.race([
         (async () => {
-          await page.mouse.move(cardAnchor.x, cardAnchor.y, { steps: 8 }).catch(() => {});
+          await page.mouse.move(anchorPos.x, anchorPos.y, { steps: 8 }).catch(() => {});
           await page.mouse.down().catch(() => {});
           await sleep(60 + Math.random() * 80);
           await page.mouse.up().catch(() => {});
@@ -713,7 +718,14 @@ export async function clickAndReportAd(
       aclkFired = true;
       await sleep(1800);
       const pages = page.context().pages();
-      if (pages.length > pagesBefore) landingPage = pages[pages.length - 1]!;
+      return pages.length > pagesBefore ? pages[pages.length - 1]! : page;
+    };
+
+    let cardAnchor = await locateCardAnchor();
+
+    let landingPage: Page = page;
+    if (cardAnchor) {
+      landingPage = await mouseClickCard(cardAnchor);
     } else {
       let clickAnchor = null;
       if (currentAd.isOrganic) {
@@ -787,6 +799,33 @@ export async function clickAndReportAd(
       // listener a bounded grace window before judging the click failed.
       for (let i = 0; i < 10 && !aclkWatch?.sawClickProof(); i++) {
         await sleep(500);
+      }
+    }
+    // Same-impression retry (app ads only): the click attempt produced no
+    // proof — the card rotated under the mouse, an overlay stole the click,
+    // or the chain died silently. Live storm data: ~50% of these succeed on
+    // the very next attempt against the SAME card, so ONE bounded retry:
+    // dismiss overlays, re-locate the card, mouse-click again, re-wait the
+    // proof window. This runs BEFORE any landing step; a second failure
+    // takes the honest "no navigation" path below. The listener is
+    // event-based, so the retry's clicks simply feed the same watch.
+    if (isAppAdTarget && !landed && !aclkWatch?.sawClickProof() && landingPage === page && onSerp(page.url())) {
+      logger.warn({ jobId: jobForRecord.id, domain: currentAd.displayDomain }, "app ad: no click proof — retrying click once on the same impression");
+      await dismissOverlayDialog();
+      const retryAnchor = await locateCardAnchor();
+      if (retryAnchor) {
+        landingPage = await mouseClickCard(retryAnchor);
+        cardAnchor = retryAnchor; // pkg extraction below prefers the fresh card
+        await landingPage.waitForLoadState("domcontentloaded", { timeout: 20000 }).catch(() => {});
+        ev.landingUrl = landingPage.url();
+        landed = !onSerp(ev.landingUrl);
+        if (!landed) {
+          for (let i = 0; i < 10 && !aclkWatch?.sawClickProof(); i++) {
+            await sleep(500);
+          }
+        }
+      } else {
+        logger.warn({ jobId: jobForRecord.id, domain: currentAd.displayDomain }, "app ad retry: card no longer on SERP (rotated)");
       }
     }
     const aclkSeen = aclkWatch?.sawClickProof() ?? false;
