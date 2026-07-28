@@ -1972,17 +1972,21 @@ export function createWebServer(port: number): void {
         lastRecoveryAt = Date.now();
         // Mark recovery targets in-use so the idle reaper can't kill their
         // browsers mid-pass (recovery opens them without the worker registry).
+        // Batch 6: post-storm vault rebuild needs ~3h instead of ~6h; still
+        // gentle enough not to re-flag the IPs (one profile at a time per pass
+        // inside runRecoveryPass, staggered opens).
+        const RECOVERY_BATCH = 6;
         const { markProfileInUse, releaseProfile } = await import("../browser/profileRegistry.js");
-        for (const id of dueIds.slice(0, 3)) markProfileInUse(id);
+        for (const id of dueIds.slice(0, RECOVERY_BATCH)) markProfileInUse(id);
         try {
-          logger.info({ due: dueIds.length }, "supervisor: idle — recovering due profiles (max 3)");
+          logger.info({ due: dueIds.length }, "supervisor: idle — recovering due profiles (max 6)");
           emitEvent({
             type: "supervisor-recovery",
             count: dueIds.length,
-            message: `Supervisor: ${dueIds.length} profil cooldown'da · 3 tanesi iyileştiriliyor (sistem boşta)`,
+            message: `Supervisor: ${dueIds.length} profil cooldown'da · ${Math.min(RECOVERY_BATCH, dueIds.length)} tanesi iyileştiriliyor (sistem boşta)`,
           });
           const { runRecoveryPass } = await import("../captcha/recovery.js");
-          const report = await runRecoveryPass(config, { limit: 3 });
+          const report = await runRecoveryPass(config, { limit: RECOVERY_BATCH });
           logger.info(
             { clean: report.clean, solved: report.captcha_solved, hard: report.captcha, err: report.error },
             "supervisor: recovery pass done"
@@ -1994,7 +1998,7 @@ export function createWebServer(port: number): void {
             message: `Supervisor iyileştirme bitti · temiz ${report.clean} · çözüldü ${report.captcha_solved} · duvar ${report.captcha}`,
           });
         } finally {
-          for (const id of dueIds.slice(0, 3)) releaseProfile(id);
+          for (const id of dueIds.slice(0, RECOVERY_BATCH)) releaseProfile(id);
         }
       } catch (err) {
         logger.debug({ err: String(err) }, "supervisor tick failed (ignored)");
