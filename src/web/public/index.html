@@ -25,6 +25,7 @@
       </div>
       <div class="topbar-nav">
         <button class="nav-item active" data-view="scan">Tarama</button>
+        <button class="nav-item" data-view="opsmode">Operasyon</button>
         <button class="nav-item" data-view="ops">Operasyonlar</button>
         <button class="nav-item" data-view="proof">Raporlama</button>
         <button class="nav-item" data-view="log">Terminal</button>
@@ -137,6 +138,116 @@
             </table>
           </div>
           <div id="scans-pager" class="pager"></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ═══ OPERASYON (yeni birleşik sistem) ═══ -->
+    <div class="view hidden" id="view-opsmode">
+      <header class="page-header">
+        <h1>Operasyon</h1>
+        <p class="subtitle">Zenginlik gözcüsü, domain planı, sağlık valfi ve canlı tık motoru.</p>
+      </header>
+
+      <section class="panel" id="ops-live-panel">
+        <div class="panel-head">
+          <div class="panel-icon ops-icon">⚡</div>
+          <div>
+            <h2>Canlı Hızlar</h2>
+            <p class="panel-desc">Domain başına saatlik tık ve şikayet — motorun nabzı.</p>
+          </div>
+          <div class="ops-control">
+            <span id="ops-mode-status" class="op-status">KAPALI</span>
+            <label class="switch" title="Ops modunu aç/kapat">
+              <input type="checkbox" id="ops-enabled-toggle" />
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="ops-engine-meta" class="op-meta">Motor bekleniyor…</div>
+          <div id="ops-rates" class="ops-rates">
+            <div class="empty">Henüz hız verisi yok</div>
+          </div>
+          <div id="ops-totals" class="ops-totals"></div>
+        </div>
+      </section>
+
+      <section class="panel" id="ops-valve-panel">
+        <div class="panel-head">
+          <div class="panel-icon jobs-icon">⛨</div>
+          <div>
+            <h2>Sağlık Valfi</h2>
+            <p class="panel-desc">Captcha birikirse operasyon kendini duraklatır.</p>
+          </div>
+          <span id="ops-valve-status" class="op-status">—</span>
+        </div>
+        <div class="panel-body">
+          <div id="ops-calm-band" class="ops-calm-band hidden">SAKINLEŞME — operasyon duraklatıldı</div>
+          <div id="ops-valve-meta" class="op-meta">Yükleniyor…</div>
+        </div>
+      </section>
+
+      <section class="panel" id="ops-plan-panel">
+        <div class="panel-head">
+          <div class="panel-icon google-icon">◎</div>
+          <div>
+            <h2>Aktif Plan</h2>
+            <p class="panel-desc" id="ops-plan-desc">Planlayıcının şu an hedeflediği domainler.</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="ops-plan-cards" class="op-grid">
+            <div class="empty">Aktif hedef yok</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="ops-richness-panel">
+        <div class="panel-head">
+          <div class="panel-icon results-icon">◈</div>
+          <div>
+            <h2>Zenginlik Haritası</h2>
+            <p class="panel-desc" id="ops-richness-meta">Gözcünün gördüğü reklam yoğunluğu.</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="ops-richness-grid" class="rich-grid">
+            <div class="empty">Henüz zenginlik verisi yok</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="ops-points-panel">
+        <div class="panel-head">
+          <div class="panel-icon log-icon">≡</div>
+          <div>
+            <h2>Noktalar</h2>
+            <p class="panel-desc">Her tarayıcı sekmesi bir nokta — profil, hedef ve sayaçlarıyla.</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="table-wrap">
+            <table id="tbl-ops-points">
+              <thead>
+                <tr>
+                  <th>Profil</th>
+                  <th>Sekme</th>
+                  <th>Cihaz</th>
+                  <th>Domain</th>
+                  <th>Keyword</th>
+                  <th>Durum</th>
+                  <th>Son Aksiyon</th>
+                  <th>Tık</th>
+                  <th>Rapor</th>
+                  <th>Fail</th>
+                  <th>Miss</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div id="ops-points-empty" class="empty">Motor kapalı — nokta yok</div>
         </div>
       </section>
     </div>

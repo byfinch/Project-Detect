@@ -116,6 +116,12 @@ export interface RunScanOpts {
   protectPool?: boolean;
   /** Abort signal to cancel the scan early. */
   signal?: AbortSignal;
+  /**
+   * Optional scans.notes marker. Ops watcher probes pass "ops-watch" so the
+   * panel's "another scan running" guards can tell a light probe apart from
+   * a classic scan and never block on it.
+   */
+  scanNote?: string;
 }
 
 class AsyncMutex {
@@ -1579,6 +1585,7 @@ export async function runScan(
     devices: config.devices,
     location: [config.location.city, config.location.country].filter(Boolean).join(", "),
     totalAds: 0,
+    notes: opts.scanNote,
   });
   logger.info(
     {

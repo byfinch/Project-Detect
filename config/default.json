@@ -117,8 +117,24 @@
       "refillPerHour": 40
     }
   },
-  "bettingKeywords": [
-    "bahis",
+  "ops": {
+    "enabled": false,
+    "watchIntervalMinutes": 15,
+    "watchBudgetPct": 10,
+    "richThreshold": 2,
+    "domainHysteresisMinutes": 10,
+    "calmThreshold": 15,
+    "resumeThreshold": 5,
+    "maxActiveDomains": 2,
+    "brandPriority": ["herabet", "primebahis", "napolibet", "rovbet", "vegasslot"],
+    "browsers": 10,
+    "tabsPerBrowser": 2,
+    "refreshSec": 90,
+    "missRetrySec": 150,
+    "maxMisses": 6,
+    "keywordRotateEvery": 4
+  },
+  "bettingKeywords": [    "bahis",
     "casino",
     "slot",
     "bonus",

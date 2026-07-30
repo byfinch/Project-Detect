@@ -16,6 +16,16 @@ import { buildAdComplaintPack } from "../report/adComplaintPack.js";
 import { getEmailPool } from "../report/emailPool.js";
 import { solverCostSummary } from "../report/solverCost.js";
 import { getCaptchaPolicy } from "../captcha/policy.js";
+import {
+  getRichnessSnapshot,
+  initRichness,
+  ingestScanResults,
+  startRichnessWatcher,
+  stopRichnessWatcher,
+} from "../ops/richness.js";
+import { getPlanState, initPlanner } from "../ops/planner.js";
+import { evaluateValve, getValveState, initHealthValve, isCalm } from "../ops/healthValve.js";
+import { getOpsEngineStatus, startOpsEngine, stopOpsEngine } from "../ops/engine.js";
 
 import { logger } from "../logger.js";
 import type { Device } from "../types.js";
@@ -105,20 +115,31 @@ function panelSettingsPath(outputDir: string): string {
   return resolve(outputDir, "panel-settings.json");
 }
 
-function loadScheduledScanEnabled(outputDir: string): void {
+/** Ops mode (unified system, Package 1). Persisted like scheduledScanEnabled. */
+let opsEnabled = false;
+
+function loadPanelSettings(outputDir: string): void {
   try {
-    const raw = JSON.parse(readFileSync(panelSettingsPath(outputDir), "utf8")) as { scheduledScanEnabled?: boolean };
+    const raw = JSON.parse(readFileSync(panelSettingsPath(outputDir), "utf8")) as {
+      scheduledScanEnabled?: boolean;
+      opsEnabled?: boolean;
+    };
     if (typeof raw.scheduledScanEnabled === "boolean") scheduledScan.enabled = raw.scheduledScanEnabled;
+    if (typeof raw.opsEnabled === "boolean") opsEnabled = raw.opsEnabled;
   } catch {
-    /* first boot or unreadable — keep default true */
+    /* first boot or unreadable — keep defaults */
   }
 }
 
-function persistScheduledScanEnabled(outputDir: string): void {
+function persistPanelSettings(outputDir: string): void {
   try {
-    writeFileSync(panelSettingsPath(outputDir), JSON.stringify({ scheduledScanEnabled: scheduledScan.enabled }, null, 2), "utf8");
+    writeFileSync(
+      panelSettingsPath(outputDir),
+      JSON.stringify({ scheduledScanEnabled: scheduledScan.enabled, opsEnabled }, null, 2),
+      "utf8"
+    );
   } catch (err) {
-    logger.debug({ err: String(err) }, "persistScheduledScanEnabled failed");
+    logger.debug({ err: String(err) }, "persistPanelSettings failed");
   }
 }
 
@@ -130,9 +151,11 @@ async function isScanRunningInDb(outputDir: string): Promise<boolean> {
   try {
     const store = new Store(outputDir);
     try {
-      const row = store.db.prepare("SELECT id FROM scans WHERE finished_at IS NULL LIMIT 1").get() as
-        | { id: number }
-        | undefined;
+      // "ops-watch" rows are light richness probes, not classic scans — they
+      // must never block the scheduler or the manual scan button.
+      const row = store.db
+        .prepare("SELECT id FROM scans WHERE finished_at IS NULL AND COALESCE(notes, '') NOT LIKE 'ops-watch%' LIMIT 1")
+        .get() as { id: number } | undefined;
       return !!row;
     } finally {
       store.close();
@@ -624,6 +647,9 @@ export function createWebServer(port: number): void {
 
   const config = loadConfig();
   loadPersistedJobs(config.output.dir);
+  // Default comes from config.ops.enabled; panel-settings.json overrides it
+  // once loadPanelSettings runs inside startScheduledScanCron.
+  opsEnabled = config.ops.enabled;
 
   // Clean up scans / click runs that were left open by crashed processes.
   try {
@@ -1376,7 +1402,7 @@ export function createWebServer(port: number): void {
   /** Enable/disable the scheduled scan cron (keeps the same 2h slots when re-enabled). */
   app.post("/api/scheduled-scan/enabled", (req: Request, res: Response) => {
     scheduledScan.enabled = req.body?.enabled !== false;
-    persistScheduledScanEnabled(config.output.dir);
+    persistPanelSettings(config.output.dir);
     if (scheduledScan.enabled) {
       // Re-arm on the regular slot grid (06:00, 08:00, …) — no custom drift.
       scheduledScan.nextAt = getNextScheduledSlot().toISOString();
@@ -1513,9 +1539,9 @@ export function createWebServer(port: number): void {
     try {
       const guardStore = new Store(config.output.dir);
       try {
-        const running = guardStore.db.prepare("SELECT id FROM scans WHERE finished_at IS NULL LIMIT 1").get() as
-          | { id: number }
-          | undefined;
+        const running = guardStore.db
+          .prepare("SELECT id FROM scans WHERE finished_at IS NULL AND COALESCE(notes, '') NOT LIKE 'ops-watch%' LIMIT 1")
+          .get() as { id: number } | undefined;
         if (running) {
           throw new Error(`Başka bir tarama zaten çalışıyor (scan #${running.id})`);
         }
@@ -1725,8 +1751,21 @@ export function createWebServer(port: number): void {
           cloneAnalysis,
         });
 
+        // Free richness signal: classic scan results feed the ops richness
+        // table, so the watcher spends less of its own probe budget.
+        if (opsEnabled) {
+          try {
+            const ingested = ingestScanResults(summary.scanId, cfg.ops.brandPriority);
+            logger.info({ scanId: summary.scanId, domains: ingested }, "ops richness ingested classic scan");
+          } catch (err) {
+            logger.warn({ err: String(err) }, "ops richness ingest after classic scan failed");
+          }
+        }
+
         // Ad reporting is now performed inside each focus click profile before the click.
-        if (cfg.scan.autoFocusCampaignAfterScan && cloneAnalysis.totalClicks > 0 && cloneAnalysis.cloneCount > 0) {
+        // Ops mode owns the operation loop — the classic auto campaign must NOT
+        // start while it is active (the planner decides what runs instead).
+        if (cfg.scan.autoFocusCampaignAfterScan && !opsEnabled && cloneAnalysis.totalClicks > 0 && cloneAnalysis.cloneCount > 0) {
           try {
             if (!(activeCampaign?.status === "running")) {
               startFocusCampaignJob({ scanId: summary.scanId, cfg, auto: true });
@@ -1756,7 +1795,7 @@ export function createWebServer(port: number): void {
   }
 
   function startScheduledScanCron(): void {
-    loadScheduledScanEnabled(config.output.dir);
+    loadPanelSettings(config.output.dir);
     scheduledScan.nextAt = getNextScheduledSlot().toISOString();
     logger.info({ nextAt: scheduledScan.nextAt, enabled: scheduledScan.enabled }, "scheduled scan cron started");
 
@@ -2009,6 +2048,127 @@ export function createWebServer(port: number): void {
   }
 
   startProfileSupervisor();
+
+  // ── Ops mode (unified system, Package 1) ─────────────────────
+  // Richness watcher + domain planner + health valve. Everything is inert
+  // while opsEnabled is false (config default) — the classic flow above is
+  // untouched. Toggled via POST /api/ops/enabled (persisted in panel-settings).
+  let valveTimer: NodeJS.Timeout | null = null;
+
+  const opsIsBusy = (): boolean =>
+    activeCampaign?.status === "running" ||
+    activeStorm !== null ||
+    Array.from(jobs.values()).some((j) => j.status === "running");
+
+  function startOpsRuntime(): void {
+    initPlanner(config.ops);
+    startRichnessWatcher({ config, isBusy: opsIsBusy, isCalm, emit: emitEvent });
+    // Package 2: production engine (persistent browsers x tabs). Fire and
+    // forget — it self-manages and yields to classic ops via opsIsBusy.
+    void startOpsEngine({ config, isBusy: opsIsBusy, isCalm, emit: emitEvent }).catch((err) =>
+      logger.warn({ err: String(err) }, "ops engine start failed")
+    );
+    // Valve re-evaluates every minute; SSE "ops-valve" fires only on flips.
+    valveTimer = setInterval(() => {
+      try {
+        evaluateValve();
+      } catch (err) {
+        logger.debug({ err: String(err) }, "ops valve tick failed");
+      }
+    }, 60_000);
+    logger.info({ brandPriority: config.ops.brandPriority }, "ops runtime started");
+  }
+
+  function stopOpsRuntime(): void {
+    stopRichnessWatcher();
+    // Graceful engine stop runs in the background (10s grace + force).
+    void stopOpsEngine().catch((err) => logger.debug({ err: String(err) }, "ops engine stop failed"));
+    if (valveTimer) {
+      clearInterval(valveTimer);
+      valveTimer = null;
+    }
+    logger.info("ops runtime stopped");
+  }
+
+  // Read-only state is initialized on EVERY boot (JSON + vault reads only) so
+  // the /api/ops/* endpoints answer even while ops mode is off. No component
+  // actually runs until opsEnabled flips on.
+  initRichness(config.output.dir, config.ops.richThreshold);
+  initPlanner(config.ops);
+  initHealthValve({
+    outputDir: config.output.dir,
+    calmThreshold: config.ops.calmThreshold,
+    resumeThreshold: config.ops.resumeThreshold,
+    onChange: (s) =>
+      emitEvent({
+        type: "ops-valve",
+        calm: s.calm,
+        captchaCount: s.captchaCount,
+        usableCount: s.usableCount,
+        message: s.calm
+          ? `Sağlık valfi KAPANDI · vault captcha ${s.captchaCount} · operasyon duraklatıldı`
+          : `Sağlık valfi açıldı · vault captcha ${s.captchaCount} · operasyon devam`,
+      }),
+  });
+  if (opsEnabled) startOpsRuntime();
+
+  app.get("/api/ops/richness", (_req: Request, res: Response) => {
+    try {
+      res.json(getRichnessSnapshot());
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  app.get("/api/ops/plan", (_req: Request, res: Response) => {
+    try {
+      res.json({ enabled: opsEnabled, ...getPlanState() });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  app.get("/api/ops/valve", (_req: Request, res: Response) => {
+    try {
+      res.json({
+        enabled: opsEnabled,
+        ...getValveState(),
+        calmThreshold: config.ops.calmThreshold,
+        resumeThreshold: config.ops.resumeThreshold,
+      });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  /** Ops engine (Package 2): live pool status — browsers, points, per-domain counters. */
+  app.get("/api/ops/engine", (_req: Request, res: Response) => {
+    try {
+      res.json({ enabled: opsEnabled, engine: getOpsEngineStatus() });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  app.post("/api/ops/enabled", (req: Request, res: Response) => {
+    const enabled = req.body?.enabled === true;
+    if (enabled !== opsEnabled) {
+      opsEnabled = enabled;
+      persistPanelSettings(config.output.dir);
+      if (opsEnabled) startOpsRuntime();
+      else stopOpsRuntime();
+    }
+    logger.info({ enabled: opsEnabled }, "ops mode toggled");
+    emitEvent({
+      type: "ops-enabled",
+      enabled: opsEnabled,
+      message: opsEnabled
+        ? "Ops modu açıldı · gözcü + planlayıcı + valf aktif"
+        : "Ops modu kapatıldı · klasik akış devam ediyor",
+    });
+    res.json({ ok: true, enabled: opsEnabled });
+  });
+
 
   app.post("/api/scans/:id/click", async (req: Request, res: Response) => {
     const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;

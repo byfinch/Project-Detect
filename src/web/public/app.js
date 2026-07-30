@@ -487,7 +487,16 @@ function setupSSE() {
   es.onmessage = (e) => {
     try {
       const d = JSON.parse(e.data);
-      if (d.message) log(eventLevel(d.type), d.message);
+      // ops-stats her tıkta akar — terminali boğmasın, sadece canlı sayaçları beslesin
+      if (d.type === "ops-stats") {
+        updateOpsFromStats(d);
+      } else if (d.message) {
+        const level = d.type === "ops-valve" ? (d.calm ? "warn" : "ok") : eventLevel(d.type);
+        log(level, d.message);
+      }
+      if (["ops-point", "ops-click", "ops-valve", "ops-enabled"].includes(d.type)) {
+        refreshOpsMode();
+      }
       if (["scan-completed", "scan-started", "click-completed", "click-done", "campaign-rescan-done", "storm-started", "storm-completed", "storm-click", "storm-progress"].includes(d.type)) {
         refresh();
       }
@@ -501,6 +510,7 @@ function eventLevel(t) {
   if (t === "scan-completed" || t === "click-completed" || t === "campaign-rescan-done" || t.includes("ok")) return "ok";
   if (t.includes("started") || t === "scan-progress") return "info";
   if (t.includes("captcha") || t.includes("warn")) return "warn";
+  if (t.startsWith("ops-")) return "info";
   return "";
 }
 
@@ -794,14 +804,255 @@ function renderProof(data) {
   renderProofPager(data.total || results.length, data.page || 1, data.limit || PROOF_LIMIT);
 }
 
+/* ── Ops mode (yeni birleşik sistem: gözcü + planlayıcı + valf + motor) ── */
+const RICH_THRESHOLD = 2; // config.ops.richThreshold default — sadece vurgulama için
+let opsCache = { plan: null, valve: null, richness: null, engine: null };
+let opsPollInFlight = false;
+let lastOpsRefreshAt = 0;
+
+function fmtAgo(iso) {
+  if (!iso) return "—";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 15_000) return "az önce";
+  const min = Math.floor(ms / 60_000);
+  if (min < 60) return `${min} dk`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h} sa`;
+  return `${Math.floor(h / 24)} g`;
+}
+
+function opsViewVisible() {
+  return !document.getElementById("view-opsmode")?.classList.contains("hidden");
+}
+
+function renderOpsControl(enabled) {
+  const toggle = document.getElementById("ops-enabled-toggle");
+  const status = document.getElementById("ops-mode-status");
+  if (toggle && document.activeElement !== toggle) toggle.checked = !!enabled;
+  if (status) {
+    status.textContent = enabled ? "AKTİF" : "KAPALI";
+    status.className = enabled ? "op-status run ops-on" : "op-status";
+  }
+}
+
+function renderOpsRates(engineRes) {
+  const el = document.getElementById("ops-rates");
+  const totalsEl = document.getElementById("ops-totals");
+  const metaEl = document.getElementById("ops-engine-meta");
+  if (!el || !totalsEl || !metaEl) return;
+  const eng = engineRes?.engine;
+  if (!eng || !eng.running) {
+    metaEl.textContent = engineRes?.enabled
+      ? "Motor durdu — plan veya valf bekleniyor"
+      : "Ops modu kapalı — yukarıdaki anahtarla başlat";
+    el.innerHTML = `<div class="empty">Motor çalışmıyor</div>`;
+    totalsEl.innerHTML = "";
+    return;
+  }
+  const t = eng.totals || { clicks: 0, reports: 0, failed: 0, skipped: 0, queriesLastHour: 0 };
+  metaEl.textContent = `run #${eng.runId} · ${eng.browsers} tarayıcı · ${eng.activePoints} aktif nokta · ${t.queriesLastHour} sorgu/saat`;
+  const per = eng.perDomain || [];
+  el.innerHTML = per.length
+    ? per
+        .map(
+          (d) => `<div class="ops-rate-card">
+        <div class="ops-rate-domain" title="${esc(d.domain)}">${esc(d.domain)}</div>
+        <div class="ops-rate-nums">
+          <div class="ops-rate-num">${d.clicksPerHour}<span>tık/sa</span></div>
+          <div class="ops-rate-num rep">${d.reports}<span>şikayet</span></div>
+        </div>
+        <div class="ops-rate-sub">${d.clicks} toplam tık</div>
+      </div>`
+        )
+        .join("")
+    : `<div class="empty">Henüz domain bazlı tık yok</div>`;
+  totalsEl.textContent = `toplam ${t.clicks} tık · ${t.reports} rapor · ${t.failed} fail · ${t.skipped} skip`;
+}
+
+function renderOpsValve(v) {
+  const status = document.getElementById("ops-valve-status");
+  const band = document.getElementById("ops-calm-band");
+  const meta = document.getElementById("ops-valve-meta");
+  if (!status || !band || !meta) return;
+  if (!v) {
+    status.textContent = "—";
+    status.className = "op-status";
+    meta.textContent = "Valf verisi yok";
+    return;
+  }
+  if (v.calm) {
+    status.textContent = "SAKINLEŞME";
+    status.className = "op-status calm";
+    band.classList.remove("hidden");
+  } else {
+    status.textContent = "AKIŞ AÇIK";
+    status.className = "op-status run";
+    band.classList.add("hidden");
+  }
+  meta.textContent = `captcha ${v.captchaCount ?? 0} · usable ${v.usableCount ?? 0} · sakinleşme eşiği ${v.calmThreshold} · toparlanma eşiği ${v.resumeThreshold}`;
+}
+
+function renderOpsPlan(p) {
+  const el = document.getElementById("ops-plan-cards");
+  const desc = document.getElementById("ops-plan-desc");
+  if (!el) return;
+  if (desc && p) {
+    desc.textContent = `en fazla ${p.maxActiveDomains} domain · histerezis ${p.hysteresisMinutes} dk · güncelleme ${fmtTime(p.updatedAt)}`;
+  }
+  const active = p?.active || [];
+  if (!active.length) {
+    el.innerHTML = `<div class="empty">Aktif hedef yok — zengin domain bekleniyor</div>`;
+    return;
+  }
+  el.innerHTML = active
+    .map(
+      (a) => `<div class="op-card">
+      <div class="op-header">
+        <div class="op-icon">◎</div>
+        <span class="op-status run">ÖNCELİK #${(a.priority ?? 0) + 1}</span>
+      </div>
+      <h3>${esc(a.domain)}</h3>
+      <p class="op-desc">${esc((a.keywords || []).join(" · ") || "—")}</p>
+      <div class="op-meta">${esc(a.device)} · skor ${Number(a.score || 0).toFixed(1)} · ${fmtAgo(a.since)} aktif</div>
+      ${a.hysteresisLocked ? `<span class="badge stale">histerezis kilidi</span>` : ""}
+    </div>`
+    )
+    .join("");
+}
+
+function renderOpsRichness(r) {
+  const grid = document.getElementById("ops-richness-grid");
+  const meta = document.getElementById("ops-richness-meta");
+  if (!grid) return;
+  const w = r?.watcher;
+  if (meta) {
+    meta.textContent = w
+      ? `gözcü ${w.running ? "çalışıyor" : "durdu"} · son tur ${fmtTime(w.lastTickAt)} · ${w.queriesLastHour}/${w.budgetPerHour} sorgu/saat`
+      : "Gözcü verisi yok";
+  }
+  const domains = r?.domains || [];
+  if (!domains.length) {
+    grid.innerHTML = `<div class="empty">Henüz zenginlik verisi yok</div>`;
+    return;
+  }
+  const maxScore = Math.max(...domains.map((d) => d.score || 0), 1);
+  const planned = new Set((opsCache.plan?.active || []).map((a) => a.domain));
+  grid.innerHTML = domains
+    .slice(0, 24)
+    .map((d) => {
+      const rich = (d.score || 0) >= RICH_THRESHOLD;
+      const pct = Math.max(6, Math.min(100, Math.round(((d.score || 0) / maxScore) * 100)));
+      const devBadges = Object.entries(d.devices || {})
+        .map(([dev, n]) => `<span class="health-chip usable">${esc(dev)} ${n}</span>`)
+        .join("");
+      const tag = planned.has(d.key)
+        ? `<span class="badge run">PLANDA</span>`
+        : rich
+          ? `<span class="badge ok">ZENGİN</span>`
+          : "";
+      return `<div class="rich-card ${rich ? "rich" : ""}">
+      <div class="rich-head">
+        <span class="rich-brand">${esc(d.brand || "—")}</span>
+        ${tag}
+      </div>
+      <div class="rich-domain" title="${esc(d.key)}">${esc(d.key)}</div>
+      <div class="score-bar"><span style="width:${pct}%"></span></div>
+      <div class="rich-meta">${d.adCount} reklam · skor ${Number(d.score || 0).toFixed(1)} · son ${fmtAgo(d.lastSeenAt)}</div>
+      <div class="rich-devs">${devBadges}</div>
+    </div>`;
+    })
+    .join("");
+}
+
+function pointStateBadge(state) {
+  const map = { active: "run", miss: "ok", starting: "stale", parked: "stale", idle: "stale" };
+  return `<span class="badge ${map[state] || "stale"}">${esc(state || "—")}</span>`;
+}
+
+function renderOpsPoints(engineRes) {
+  const tbody = document.querySelector("#tbl-ops-points tbody");
+  const empty = document.getElementById("ops-points-empty");
+  if (!tbody || !empty) return;
+  const points = engineRes?.engine?.points || [];
+  if (!points.length) {
+    tbody.innerHTML = "";
+    empty.style.display = "block";
+    return;
+  }
+  empty.style.display = "none";
+  tbody.innerHTML = points
+    .map((p) => {
+      const kw = p.keyword || "—";
+      const act = p.lastAction || "—";
+      return `<tr>
+      <td class="mono" title="${esc(p.profileId)}">…${esc(String(p.profileId || "").slice(-6))}</td>
+      <td class="mono">t${p.tabIndex}</td>
+      <td>${esc(p.device)}</td>
+      <td class="mono">${esc(p.domain || "—")}</td>
+      <td title="${esc(kw)}">${esc(kw.length > 18 ? kw.slice(0, 18) + "…" : kw)}</td>
+      <td>${pointStateBadge(p.state)}</td>
+      <td class="muted" title="${esc(act)}">${esc(act.length > 26 ? act.slice(0, 26) + "…" : act)}</td>
+      <td class="mono">${p.clicks}</td>
+      <td class="mono">${p.reports}</td>
+      <td class="mono">${p.fails}</td>
+      <td class="mono">${p.misses}</td>
+    </tr>`;
+    })
+    .join("");
+}
+
+async function refreshOpsMode(force = false) {
+  if (opsPollInFlight) return;
+  if (!force && !opsViewVisible()) return; // görünmeyen görünümü poll etme
+  if (!force && Date.now() - lastOpsRefreshAt < 3000) return; // SSE fırtınasına karşı
+  lastOpsRefreshAt = Date.now();
+  opsPollInFlight = true;
+  try {
+    const [plan, valve, richness, engine] = await Promise.all([
+      API.get("/api/ops/plan").catch(() => null),
+      API.get("/api/ops/valve").catch(() => null),
+      API.get("/api/ops/richness").catch(() => null),
+      API.get("/api/ops/engine").catch(() => null),
+    ]);
+    opsCache = { plan, valve, richness, engine };
+    renderOpsControl(plan?.enabled ?? engine?.enabled ?? false);
+    renderOpsRates(engine);
+    renderOpsValve(valve);
+    renderOpsPlan(plan);
+    renderOpsRichness(richness);
+    renderOpsPoints(engine);
+  } finally {
+    opsPollInFlight = false;
+  }
+}
+
+/** ops-stats SSE: sayaçları ve hızları tam poll olmadan canlı güncelle. */
+function updateOpsFromStats(d) {
+  if (!opsViewVisible()) return;
+  const eng = opsCache.engine?.engine;
+  if (!eng || !eng.running) return;
+  if (d.totals) eng.totals = d.totals;
+  if (d.perDomain) eng.perDomain = d.perDomain;
+  if (d.browsers != null) eng.browsers = d.browsers;
+  if (d.activePoints != null) eng.activePoints = d.activePoints;
+  if (d.runId != null) eng.runId = d.runId;
+  renderOpsRates(opsCache.engine);
+}
+
 function init() {
   renderLogs();
   void loadServerLogs();
   document.querySelectorAll(".nav-item").forEach((btn) =>
-    btn.addEventListener("click", () => switchView(btn.dataset.view))
+    btn.addEventListener("click", () => {
+      switchView(btn.dataset.view);
+      if (btn.dataset.view === "opsmode") refreshOpsMode(true);
+    })
   );
   const savedView = localStorage.getItem(VIEW_KEY);
-  if (savedView && document.getElementById("view-" + savedView)) switchView(savedView);
+  if (savedView && document.getElementById("view-" + savedView)) {
+    switchView(savedView);
+    if (savedView === "opsmode") refreshOpsMode(true);
+  }
   document.getElementById("scan-form").addEventListener("submit", onScanSubmit);
 
   // Default brands switch: ON → box pre-filled + locked; OFF → custom list
@@ -851,9 +1102,21 @@ function init() {
       window.location.href = "/login";
     });
   }
+  document.getElementById("ops-enabled-toggle")?.addEventListener("change", async (e) => {
+    const enabled = e.target.checked;
+    try {
+      await API.post("/api/ops/enabled", { enabled });
+      log("info", enabled ? "ops modu açıldı" : "ops modu kapatıldı");
+      await refreshOpsMode(true);
+    } catch (err) {
+      e.target.checked = !enabled;
+      log("err", `ops modu: ${err.message}`);
+    }
+  });
   setupSSE();
   refresh(true);
   setInterval(refresh, 10000);
+  setInterval(refreshOpsMode, 15000);
 }
 
 init();

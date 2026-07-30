@@ -229,6 +229,51 @@ const ConfigSchema = z.object({
         .default({}),
     })
     .default({}),
+  /**
+   * Unified ops system (Package 1): richness watcher + domain planner +
+   * health valve. Disabled by default — activation is controlled via
+   * POST /api/ops/enabled (persisted in data/panel-settings.json).
+   *
+   * Measured constraints behind these knobs:
+   *  - Safe query budget per IP: <= 40 queries/hour (watcher + operation share it).
+   *  - Ad serve-rate swings 2.5%-50% intraday — only rich windows are efficient.
+   */
+  ops: z
+    .object({
+      /** Master switch. false = no ops component runs (watcher included). */
+      enabled: z.boolean().default(false),
+      /** Watcher tick interval. */
+      watchIntervalMinutes: z.number().int().positive().default(15),
+      /** Watcher share of the total safe query budget (40 q/h), percent. */
+      watchBudgetPct: z.number().min(0).max(100).default(10),
+      /** Minimum richness score for a domain to count as RICH. */
+      richThreshold: z.number().nonnegative().default(2),
+      /** Min minutes an active domain keeps its slot (anti-flap hysteresis). */
+      domainHysteresisMinutes: z.number().int().positive().default(10),
+      /** Vault captcha count above this -> calm (operation pauses). */
+      calmThreshold: z.number().int().nonnegative().default(15),
+      /** Vault captcha count below this -> resume from calm. */
+      resumeThreshold: z.number().int().nonnegative().default(5),
+      /** Hard cap on simultaneously active domains (never more than 2). */
+      maxActiveDomains: z.number().int().positive().default(2),
+      /** Brand priority order (user-defined; planner walks this list). */
+      brandPriority: z
+        .array(z.string())
+        .default(["herabet", "primebahis", "napolibet", "rovbet", "vegasslot"]),
+      /** Ops engine: persistent browsers (each = one AdsPower profile). */
+      browsers: z.number().int().positive().default(10),
+      /** Ops engine: tabs (points) per browser, sharing the profile/IP. */
+      tabsPerBrowser: z.number().int().positive().default(2),
+      /** Base seconds between SERP refreshes per point (±40% jitter). */
+      refreshSec: z.number().int().positive().default(90),
+      /** Base seconds between retries when the target ad is missing (±40%). */
+      missRetrySec: z.number().int().positive().default(150),
+      /** Consecutive misses before the point goes back to the planner. */
+      maxMisses: z.number().int().positive().default(6),
+      /** Switch keyword within the domain set every N refreshes. */
+      keywordRotateEvery: z.number().int().positive().default(4),
+    })
+    .default({}),
   bettingKeywords: z.array(z.string()),
 });
 
@@ -390,6 +435,25 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
         minSize: file.report?.emailPool?.minSize ?? 500,
         refillPerHour: file.report?.emailPool?.refillPerHour ?? 40,
       },
+    },
+    ops: {
+      enabled: file.ops?.enabled ?? false,
+      watchIntervalMinutes: file.ops?.watchIntervalMinutes ?? 15,
+      watchBudgetPct: file.ops?.watchBudgetPct ?? 10,
+      richThreshold: file.ops?.richThreshold ?? 2,
+      domainHysteresisMinutes: file.ops?.domainHysteresisMinutes ?? 10,
+      calmThreshold: file.ops?.calmThreshold ?? 15,
+      resumeThreshold: file.ops?.resumeThreshold ?? 5,
+      maxActiveDomains: file.ops?.maxActiveDomains ?? 2,
+      brandPriority: Array.isArray(file.ops?.brandPriority)
+        ? (file.ops.brandPriority as string[]).map(String)
+        : ["herabet", "primebahis", "napolibet", "rovbet", "vegasslot"],
+      browsers: file.ops?.browsers ?? 10,
+      tabsPerBrowser: file.ops?.tabsPerBrowser ?? 2,
+      refreshSec: file.ops?.refreshSec ?? 90,
+      missRetrySec: file.ops?.missRetrySec ?? 150,
+      maxMisses: file.ops?.maxMisses ?? 6,
+      keywordRotateEvery: file.ops?.keywordRotateEvery ?? 4,
     },
     bettingKeywords: file.bettingKeywords ?? [],
     ...overrides,
