@@ -778,29 +778,6 @@ textarea { resize: vertical; line-height: 1.5; }
 
 .op-actions { display: flex; gap: 10px; }
 
-/* Storm card */
-.storm-form {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-.storm-form.disabled { opacity: 0.45; pointer-events: none; }
-.storm-form input,
-.storm-form select {
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text);
-  font-family: var(--mono);
-  font-size: 12px;
-  padding: 8px 11px;
-  outline: none;
-}
-.storm-form input:focus,
-.storm-form select:focus { border-color: var(--border-strong); }
-.storm-actions { display: flex; gap: 10px; }
-
 /* Jobs */
 .jobs-list {
   display: flex;
@@ -1520,4 +1497,137 @@ html.modal-open, body.modal-open { overflow: hidden !important; }
   .ops-control { margin-left: 0; }
   .rich-grid { grid-template-columns: 1fr; }
   .ops-rates { grid-template-columns: 1fr 1fr; }
+}
+
+/* ── Raporlama: özet şeridi ── */
+.rep-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.rep-stat {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  min-height: 58px;
+  overflow: hidden;
+}
+.rep-stat-k {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+.rep-stat-v {
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-top: 4px;
+  text-shadow: 0 0 8px rgba(0, 255, 157, 0.25);
+}
+.rep-stat-sub { font-size: 10.5px; color: var(--text-muted); margin-top: 2px; }
+.rep-stat-domains { display: flex; flex-direction: column; gap: 3px; font-size: 12px; text-shadow: none; }
+.rep-domain-chip {
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rep-domain-chip b { color: var(--accent); margin-left: 4px; }
+
+/* ── Raporlama: filtre barı ── */
+.proof-filters select,
+.proof-filters input[type="date"] {
+  padding: 9px 12px;
+  font-size: 12.5px;
+}
+.proof-filters input[type="text"] { flex: 1; min-width: 140px; }
+.proof-filters input[type="date"] { min-width: 140px; color-scheme: dark; }
+.proof-filters input[type="date"],
+.proof-filters select { flex: 0 0 auto; }
+
+/* ── Raporlama: tablo + thumbnail ── */
+tr.rep-row { cursor: pointer; transition: background 0.12s ease; }
+tr.rep-row:hover { background: var(--accent-soft); }
+.rep-thumb {
+  width: 72px;
+  height: 45px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  display: block;
+}
+#tbl-proof td, #tbl-proof th {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 190px;
+}
+#tbl-proof td:nth-child(5) { max-width: 220px; } /* mail */
+
+/* ── Rapor detay görünümü ── */
+.rep-detail-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-bottom: 14px;
+}
+.rep-detail-actions .pager-btn { text-decoration: none; }
+.ev-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+}
+.ev-item { margin: 0; }
+.ev-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+.ev-item img {
+  width: 100%;
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+}
+.ev-item a:hover img { border-color: var(--border-strong); }
+
+/* ── Yazdırma: sadece rapor detayı, açık zemin ── */
+@media print {
+  body > *:not(.modal) { display: none !important; }
+  .bg-grid, .scanline { display: none !important; }
+  .modal {
+    position: static;
+    background: #fff;
+    backdrop-filter: none;
+    padding: 0;
+    overflow: visible;
+  }
+  .modal.hidden { display: none !important; }
+  .modal-card {
+    width: 100%;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    background: #fff;
+  }
+  .modal-card, .modal-card * {
+    color: #111 !important;
+    background: #fff !important;
+    border-color: #ddd !important;
+    text-shadow: none !important;
+    box-shadow: none !important;
+  }
+  .modal-head { border-bottom: 2px solid #111 !important; }
+  .modal-body { max-height: none; overflow: visible; padding-right: 0; }
+  .rep-detail-actions, #op-detail-close { display: none !important; }
+  .ev-grid { grid-template-columns: 1fr 1fr; }
+  .ev-item { break-inside: avoid; }
+  .ev-item img { border: 1px solid #ccc !important; }
 }

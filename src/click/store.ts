@@ -109,6 +109,10 @@ export class ClickStore {
     // Add report columns if missing (existing DB migration).
     try { this.db.exec(`ALTER TABLE clicks ADD COLUMN report_status TEXT;`); } catch { /* already exists */ }
     try { this.db.exec(`ALTER TABLE clicks ADD COLUMN report_message TEXT;`); } catch { /* already exists */ }
+    // Google complaint notification id — filled lazily by the panel's
+    // /api/reports/google-check so the reporting summary can compute the
+    // confirmation rate in SQL (no live mail lookups on list render).
+    try { this.db.exec(`ALTER TABLE clicks ADD COLUMN google_notif_id TEXT;`); } catch { /* already exists */ }
     try { this.db.exec(`ALTER TABLE click_runs ADD COLUMN operation_id TEXT;`); } catch { /* already exists */ }
   }
 

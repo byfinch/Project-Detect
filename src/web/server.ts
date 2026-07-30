@@ -1053,6 +1053,19 @@ export function createWebServer(port: number): void {
    */
   const googleMailCache = new Map<string, { subject: string; date: string; notifId?: string | null; outcomeSubject?: string | null; fetchedAt: number }>();
 
+  /** YYYY-MM-DD (TR takvim günü) → ISO sınırı; end=true gün sonu 23:59. */
+  function trDayBoundaryIso(day: string, end: boolean): string | null {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+    if (!m) return null;
+    return trDateFromParts({
+      year: Number(m[1]),
+      month: Number(m[2]),
+      day: Number(m[3]),
+      hour: end ? 23 : 0,
+      minute: end ? 59 : 0,
+    }).toISOString();
+  }
+
   function submittedFilter(req: Request): { where: string; params: string[] } {
     const parts: string[] = [`c.report_status IN ('submitted','filled','submit-failed')`];
     const params: string[] = [];
@@ -1071,6 +1084,21 @@ export function createWebServer(port: number): void {
     if (device === "mobile" || device === "desktop") {
       parts.push(`c.device = ?`);
       params.push(device);
+    }
+    const status = String(req.query.status || "").trim();
+    if (["submitted", "filled", "submit-failed"].includes(status)) {
+      parts.push(`c.report_status = ?`);
+      params.push(status);
+    }
+    const fromIso = trDayBoundaryIso(String(req.query.dateFrom || "").trim(), false);
+    if (fromIso) {
+      parts.push(`c.captured_at >= ?`);
+      params.push(fromIso);
+    }
+    const toIso = trDayBoundaryIso(String(req.query.dateTo || "").trim(), true);
+    if (toIso) {
+      parts.push(`c.captured_at <= ?`);
+      params.push(toIso);
     }
     if (operation) {
       parts.push(`r.operation_id = ?`);
@@ -1161,7 +1189,7 @@ export function createWebServer(port: number): void {
 
   app.get("/api/reports/submitted", async (req: Request, res: Response) => {
     const page = Math.max(1, parseInt(String(req.query.page || "1"), 10) || 1);
-    const limit = Math.max(1, Math.min(50, parseInt(String(req.query.limit || "5"), 10) || 5));
+    const limit = Math.max(1, Math.min(50, parseInt(String(req.query.limit || "25"), 10) || 25));
     const store = new ClickStore(config.output.dir);
     try {
       const { where, params } = submittedFilter(req);
@@ -1170,38 +1198,35 @@ export function createWebServer(port: number): void {
         .get(...params) as { c: number };
       const rows = store.db
         .prepare(
-          `SELECT c.id, c.run_id, c.job_id, c.keyword, c.target_domain, c.device, c.profile_id, c.status, c.report_status, c.report_message, c.captured_at
+          `SELECT c.id, c.run_id, c.job_id, c.keyword, c.target_domain, c.device, c.profile_id, c.status, c.report_status, c.report_message, c.captured_at, c.google_notif_id
            FROM clicks c LEFT JOIN click_runs r ON c.run_id = r.id
            WHERE ${where}
            ORDER BY c.captured_at DESC, c.id DESC LIMIT ? OFFSET ?`
         )
         .all(...params, limit, (page - 1) * limit) as Array<Record<string, unknown>>;
 
-      const pool = getEmailPool(config.output.dir);
-      const results = [];
-      for (const r of rows) {
+      // FAST PATH: no live mail.tm lookups here — the old per-row
+      // latestGoogleNotificationFull() calls made cold page loads take seconds.
+      // Google confirmation comes from the persisted google_notif_id column
+      // (written by /api/reports/google-check) or the warm in-memory cache;
+      // the UI lazily calls google-check for rows still missing an id.
+      const results = rows.map((r) => {
         const msg = String(r.report_message || "");
         const mailMatch = /mail (?:pool|static):(\S+)/.exec(msg);
         const email = mailMatch?.[1] ?? null;
-        let google: { subject: string; date: string; notifId?: string | null; outcomeSubject?: string | null } | null = null;
+        let notifId = r.google_notif_id ? String(r.google_notif_id) : null;
+        let outcome: string | null = null;
         if (email) {
-          // Cache per email+report-hour — the same pool address serves many
-          // reports, and the correct confirmation differs by report time.
-          const cacheKey = `${email}|${String(r.captured_at ?? "").slice(0, 13)}`;
-          const cached = googleMailCache.get(cacheKey);
-          if (cached && Date.now() - cached.fetchedAt < 10 * 60_000) {
-            google = cached;
-          } else {
-            const full = await pool.latestGoogleNotificationFull(email, String(r.captured_at ?? "")).catch(() => null);
-            if (full) {
-              google = full;
-              googleMailCache.set(cacheKey, { ...full, fetchedAt: Date.now() });
-            }
+          const cached = googleMailCache.get(`${email}|${String(r.captured_at ?? "").slice(0, 13)}`);
+          if (cached) {
+            if (!notifId) notifId = cached.notifId ?? (/\b(\d{10,})\b/.exec(cached.subject)?.[1] ?? null);
+            outcome = cached.outcomeSubject ?? null;
           }
         }
-        const notifId = google?.notifId ?? (google ? (/\b(\d{10,})\b/.exec(google.subject)?.[1] ?? null) : null);
-        results.push({
+        return {
           id: Number(r.id),
+          runId: Number(r.run_id),
+          jobId: String(r.job_id ?? ""),
           capturedAt: String(r.captured_at ?? ""),
           keyword: String(r.keyword ?? ""),
           domain: String(r.target_domain ?? ""),
@@ -1211,13 +1236,187 @@ export function createWebServer(port: number): void {
           reportStatus: String(r.report_status ?? ""),
           email,
           googleNotifId: notifId,
-          googleOutcome: google?.outcomeSubject ?? null,
+          googleOutcome: outcome,
           evidenceUrl: `/api/reports/evidence-img?run=${Number(r.run_id)}&job=${encodeURIComponent(String(r.job_id ?? ""))}&name=04-report-submitted.jpg`,
-        });
-      }
-      res.json({ total: Number(countRow.c) || 0, page, limit, results });
+        };
+      });
+
+      // Summary strip (global, filter-independent): today / week / Google
+      // confirmation rate / top-3 reported domains — two cheap SQL queries.
+      const trNow = trDateParts(new Date());
+      const dayStartIso = trDateFromParts({ year: trNow.year, month: trNow.month, day: trNow.day, hour: 0, minute: 0 }).toISOString();
+      const weekStartIso = new Date(Date.now() - 7 * 86_400_000).toISOString();
+      const REPORTED = `c.report_status IN ('submitted','filled','submit-failed')`;
+      const sumRow = store.db
+        .prepare(
+          `SELECT COUNT(*) AS total,
+                  SUM(CASE WHEN c.captured_at >= ? THEN 1 ELSE 0 END) AS today,
+                  SUM(CASE WHEN c.captured_at >= ? THEN 1 ELSE 0 END) AS week,
+                  SUM(CASE WHEN c.google_notif_id IS NOT NULL AND c.google_notif_id != '' THEN 1 ELSE 0 END) AS confirmed
+           FROM clicks c WHERE ${REPORTED}`
+        )
+        .get(dayStartIso, weekStartIso) as { total: number; today: number; week: number; confirmed: number };
+      const topDomains = store.db
+        .prepare(
+          `SELECT c.target_domain AS domain, COUNT(*) AS n
+           FROM clicks c WHERE ${REPORTED}
+           GROUP BY c.target_domain ORDER BY n DESC, domain ASC LIMIT 3`
+        )
+        .all() as Array<{ domain: string; n: number }>;
+
+      const total = Number(countRow.c) || 0;
+      res.json({
+        total,
+        count: total,
+        page,
+        limit,
+        results,
+        summary: {
+          total: Number(sumRow.total) || 0,
+          today: Number(sumRow.today) || 0,
+          week: Number(sumRow.week) || 0,
+          confirmed: Number(sumRow.confirmed) || 0,
+          topDomains,
+        },
+      });
     } finally {
       store.close();
+    }
+  });
+
+  /**
+   * Lazy Google-confirmation check for ONE report row — called by the panel
+   * per visible row after the fast list render. Does the live mail.tm lookup
+   * (10-min in-memory cache) and persists a found notification id to
+   * clicks.google_notif_id so the summary rate and future renders are instant.
+   */
+  app.get("/api/reports/google-check", async (req: Request, res: Response) => {
+    const id = Math.max(0, parseInt(String(req.query.id || "0"), 10) || 0);
+    if (!id) {
+      res.status(400).json({ error: "id gerekli" });
+      return;
+    }
+    const store = new ClickStore(config.output.dir);
+    try {
+      const row = store.db
+        .prepare(`SELECT id, captured_at, report_message, google_notif_id FROM clicks WHERE id = ?`)
+        .get(id) as Record<string, unknown> | undefined;
+      if (!row) {
+        res.status(404).json({ error: "kayıt yok" });
+        return;
+      }
+      const email = /mail (?:pool|static):(\S+)/.exec(String(row.report_message || ""))?.[1] ?? null;
+      if (row.google_notif_id) {
+        res.json({ id, email, googleNotifId: String(row.google_notif_id), googleOutcome: null, cached: true });
+        return;
+      }
+      if (!email) {
+        res.json({ id, email: null, googleNotifId: null, googleOutcome: null });
+        return;
+      }
+      const cacheKey = `${email}|${String(row.captured_at ?? "").slice(0, 13)}`;
+      let full = googleMailCache.get(cacheKey) ?? null;
+      if (!full || Date.now() - full.fetchedAt >= 10 * 60_000) {
+        const pool = getEmailPool(config.output.dir);
+        const fetched = await pool.latestGoogleNotificationFull(email, String(row.captured_at ?? "")).catch(() => null);
+        if (fetched) {
+          full = { ...fetched, fetchedAt: Date.now() };
+          googleMailCache.set(cacheKey, full);
+        }
+      }
+      const notifId = full?.notifId ?? (full ? (/\b(\d{10,})\b/.exec(full.subject)?.[1] ?? null) : null);
+      if (notifId) {
+        store.db.prepare(`UPDATE clicks SET google_notif_id = ? WHERE id = ?`).run(notifId, id);
+      }
+      res.json({ id, email, googleNotifId: notifId, googleOutcome: full?.outcomeSubject ?? null });
+    } finally {
+      store.close();
+    }
+  });
+
+  /**
+   * Report detail (modal): one row + its full on-disk evidence set
+   * (01 form açıldı · 03 dolduruldu · 04 gönderim onayı). Read-only.
+   */
+  app.get("/api/reports/detail", (req: Request, res: Response) => {
+    const id = Math.max(0, parseInt(String(req.query.id || "0"), 10) || 0);
+    if (!id) {
+      res.status(400).json({ error: "id gerekli" });
+      return;
+    }
+    const store = new ClickStore(config.output.dir);
+    try {
+      const r = store.db
+        .prepare(
+          `SELECT c.id, c.run_id, c.job_id, c.keyword, c.target_domain, c.device, c.profile_id, c.status, c.report_status, c.report_message, c.captured_at, c.google_notif_id, r.operation_id
+           FROM clicks c LEFT JOIN click_runs r ON c.run_id = r.id WHERE c.id = ?`
+        )
+        .get(id) as Record<string, unknown> | undefined;
+      if (!r) {
+        res.status(404).json({ error: "kayıt yok" });
+        return;
+      }
+      const run = String(r.run_id ?? "").replace(/[^0-9]/g, "");
+      const job = String(r.job_id ?? "").replace(/[^a-zA-Z0-9._-]/g, "");
+      const evidence: Array<{ name: string; url: string }> = [];
+      if (run && job) {
+        const dir = resolve(config.output.dir, "screenshots", "reports", `run-${run}`, job);
+        try {
+          for (const name of readdirSync(dir).filter((n) => /\.(jpe?g|png)$/i.test(n)).sort()) {
+            evidence.push({
+              name,
+              url: `/api/reports/evidence-img?run=${run}&job=${encodeURIComponent(job)}&name=${encodeURIComponent(name)}`,
+            });
+          }
+        } catch {
+          /* no evidence dir */
+        }
+      }
+      const email = /mail (?:pool|static):(\S+)/.exec(String(r.report_message || ""))?.[1] ?? null;
+      res.json({
+        id,
+        capturedAt: String(r.captured_at ?? ""),
+        keyword: String(r.keyword ?? ""),
+        domain: String(r.target_domain ?? ""),
+        device: String(r.device ?? ""),
+        profileId: String(r.profile_id ?? ""),
+        clickStatus: String(r.status ?? ""),
+        reportStatus: String(r.report_status ?? ""),
+        email,
+        googleNotifId: r.google_notif_id ? String(r.google_notif_id) : null,
+        operationId: r.operation_id ? String(r.operation_id) : null,
+        evidence,
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  /**
+   * Evidence thumbnail. No sharp in the dependency set (native module —
+   * deliberately not added), so this serves the source JPG with hard
+   * immutable caching and lets the browser downscale via CSS; ~50KB files +
+   * loading="lazy" keep the list fast. `w` accepted for forward-compat.
+   */
+  app.get("/api/reports/thumb", (req: Request, res: Response) => {
+    try {
+      const run = String(req.query.run || "").replace(/[^0-9]/g, "");
+      const job = String(req.query.job || "").replace(/[^a-zA-Z0-9._-]/g, "");
+      const name = String(req.query.name || "").replace(/[^a-zA-Z0-9.-]/g, "");
+      if (!run || !job || !/\.(jpe?g|png)$/.test(name)) {
+        res.status(404).end();
+        return;
+      }
+      const base = resolve(config.output.dir, "screenshots", "reports", `run-${run}`, job);
+      const file = resolve(base, name);
+      if (!file.startsWith(base) || !existsSync(file)) {
+        res.status(404).end();
+        return;
+      }
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      res.sendFile(file);
+    } catch {
+      res.status(404).end();
     }
   });
 
@@ -1241,6 +1440,10 @@ export function createWebServer(port: number): void {
       const kw = String(req.query.keyword || "").trim();
       const dom = String(req.query.domain || "").trim();
       const op = String(req.query.operation || "").trim();
+      const dev = String(req.query.device || "").trim();
+      const st = String(req.query.status || "").trim();
+      const df = String(req.query.dateFrom || "").trim();
+      const dt = String(req.query.dateTo || "").trim();
 
       if (String(req.query.format || "") === "csv") {
         const esc = (v: unknown) => {
@@ -1274,7 +1477,7 @@ export function createWebServer(port: number): void {
       ws.getRow(1).height = 26;
 
       ws.mergeCells("A2:H2");
-      const filters = [kw && `keyword: ${kw}`, dom && `domain: ${dom}`, op && `operasyon: ${op}`].filter(Boolean).join(" · ") || "tümü";
+      const filters = [kw && `keyword: ${kw}`, dom && `domain: ${dom}`, dev && `cihaz: ${dev}`, st && `durum: ${st}`, (df || dt) && `tarih: ${df || "…"} → ${dt || "…"}`, op && `operasyon: ${op}`].filter(Boolean).join(" · ") || "tümü";
       ws.getCell("A2").value = `Detect Ops Center · üretim: ${new Date().toLocaleString("tr-TR", { timeZone: "Europe/Istanbul" })} · filtre: ${filters} · kayıt: ${rows.length}`;
       ws.getCell("A2").font = { size: 10, color: { argb: "FF636E7D" } };
       ws.getRow(2).height = 16;
@@ -1629,7 +1832,7 @@ export function createWebServer(port: number): void {
             if (event.type === "scan-progress" && (event as { phase?: string }).phase === "swarm-locked") {
               const target = (event as { target?: ClickTarget }).target;
               const scanId = Number((event as { scanId?: number }).scanId ?? 0);
-              if (target && scanId && !(activeCampaign?.status === "running")) {
+              if (target && scanId && !opsEnabled && !(activeCampaign?.status === "running")) {
                 try {
                   const started = startFocusCampaignJob({ scanId, cfg, auto: true, targetOverride: target });
                   logger.info({ jobId, scanId, domain: started.domain }, "swarm-locked: focus campaign started from scan event");
@@ -2175,6 +2378,12 @@ export function createWebServer(port: number): void {
     const scanId = parseInt(idParam || "0", 10);
 
     try {
+      // Ops mode is the single production authority — classic focus start is
+      // disabled while it is on (the engine owns browsers + reporting).
+      if (opsEnabled) {
+        res.status(409).json({ error: "Ops modu aktif — klasik focus kampanya kapalı (ops engine tek otorite)" });
+        return;
+      }
       const cfg = loadConfig();
       const started = startFocusCampaignJob({ scanId, cfg, auto: false });
       const store = new Store(cfg.output.dir);
@@ -2223,6 +2432,12 @@ export function createWebServer(port: number): void {
    */
   app.post("/api/storm/start", async (req: Request, res: Response) => {
     try {
+      // Ops mode is the single production authority — classic storm is
+      // disabled while it is on (no need to pause the engine either way).
+      if (opsEnabled) {
+        res.status(409).json({ error: "Ops modu aktif — klasik storm kapalı (ops engine tek otorite)" });
+        return;
+      }
       if (activeStorm && activeStorm.status().running) {
         res.status(400).json({ error: "Storm zaten çalışıyor — önce durdurun" });
         return;

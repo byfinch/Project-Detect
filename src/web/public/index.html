@@ -26,7 +26,6 @@
       <div class="topbar-nav">
         <button class="nav-item active" data-view="scan">Tarama</button>
         <button class="nav-item" data-view="opsmode">Operasyon</button>
-        <button class="nav-item" data-view="ops">Operasyonlar</button>
         <button class="nav-item" data-view="proof">Raporlama</button>
         <button class="nav-item" data-view="log">Terminal</button>
       </div>
@@ -250,66 +249,6 @@
           <div id="ops-points-empty" class="empty">Motor kapalı — nokta yok</div>
         </div>
       </section>
-    </div>
-
-    <!-- ═══ OPERASYONLAR ═══ -->
-    <div class="view hidden" id="view-ops">
-      <header class="page-header">
-        <h1>Operasyonlar</h1>
-        <p class="subtitle">Çalışan görevler ve operasyon bazlı tıklama-şikayet dökümü.</p>
-      </header>
-
-      <section class="panel" id="ops-panel">
-        <div class="panel-head">
-          <div class="panel-icon ops-icon"><img src="/assets/ic-operasyonlar.webp" alt="" /></div>
-          <div>
-            <h2>Operasyonlar</h2>
-            <p class="panel-desc">Çalışan ve bekleyen görevler.</p>
-          </div>
-        </div>
-        <div class="panel-body">
-          <div class="op-grid">
-            <div class="op-card">
-              <div class="op-header">
-                <div class="op-icon"><img src="/assets/ic-focus.webp" alt="" /></div>
-                <div class="op-status" id="focus-status-badge">PASİF</div>
-              </div>
-              <h3>Focus Tıklama</h3>
-              <p class="op-desc">SERP #1 reklama 2 saatlik odaklı tıklama penceresi. Sonrasında otomatik rescan.</p>
-              <div class="op-meta" id="focus-status">Beklemede</div>
-              <button id="btn-stop-focus" class="btn btn-danger" disabled>
-                <span class="btn-icon">■</span> Durdur
-              </button>
-            </div>
-            <div class="op-card">
-              <div class="op-header">
-                <div class="op-icon">⛈</div>
-                <div class="op-status" id="storm-status-badge">PASİF</div>
-              </div>
-              <h3>Storm Modu</h3>
-              <p class="op-desc">Kalıcı oturum havuzu — reklamı gören profiller kapanmadan aynı SERP'te tekrarlı tık + rapor üretir.</p>
-              <div class="op-meta" id="storm-status">Beklemede</div>
-              <div class="storm-form" id="storm-form">
-                <input type="text" id="storm-keywords" placeholder="keyword seti · virgülle (örn. herabet, herabet giriş)" />
-                <input type="text" id="storm-domain" placeholder="hedef domain (örn. herabet.com)" />
-                <select id="storm-device">
-                  <option value="mobile">Mobil</option>
-                  <option value="desktop">Masaüstü</option>
-                </select>
-              </div>
-              <div class="storm-actions">
-                <button id="btn-start-storm" class="btn btn-primary">
-                  <span class="btn-icon">▶</span> Başlat
-                </button>
-                <button id="btn-stop-storm" class="btn btn-danger" disabled>
-                  <span class="btn-icon">■</span> Durdur
-                </button>
-              </div>
-              <div id="storm-form-msg" class="form-msg"></div>
-            </div>
-          </div>
-        </div>
-      </section>
 
       <section class="panel" id="jobs-panel">
         <div class="panel-head">
@@ -323,19 +262,6 @@
           <div id="jobs-list" class="jobs-list">
             <div class="empty">Aktif iş yok</div>
           </div>
-        </div>
-      </section>
-
-      <section class="panel" id="health-panel">
-        <div class="panel-head">
-          <div class="panel-icon jobs-icon">♥</div>
-          <div>
-            <h2>Profil Sağlığı</h2>
-            <p class="panel-desc">Trust durumu: usable (yeşil) · captcha (kırmızı) · cooling (amber).</p>
-          </div>
-        </div>
-        <div class="panel-body">
-          <div id="health-grid" class="health-grid"><div class="empty">Yükleniyor…</div></div>
         </div>
       </section>
 
@@ -370,34 +296,61 @@
           <div id="op-results-pager" class="pager"></div>
         </div>
       </section>
+
+      <section class="panel" id="health-panel">
+        <div class="panel-head">
+          <div class="panel-icon jobs-icon">♥</div>
+          <div>
+            <h2>Profil Sağlığı</h2>
+            <p class="panel-desc">Trust durumu: usable (yeşil) · captcha (kırmızı) · cooling (amber).</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="health-grid" class="health-grid"><div class="empty">Yükleniyor…</div></div>
+        </div>
+      </section>
     </div>
 
-    <!-- ═══ KANIT ═══ -->
+    <!-- ═══ RAPORLAMA ═══ -->
     <div class="view hidden" id="view-proof">
       <header class="page-header">
-        <h1>Kanıt — Şikayet Kayıtları</h1>
-        <p class="subtitle">Gönderilen her şikayet; kullanılan mail, durum ve Google bildirim numarasıyla.</p>
+        <h1>Raporlama</h1>
+        <p class="subtitle">Gönderilen şikayetler, kanıt görselleri ve Google onayları.</p>
       </header>
 
       <section class="panel" id="proof-panel">
         <div class="panel-head">
           <div class="panel-icon complaints-icon">⚑</div>
           <div>
-            <h2>Gönderilen Şikayetler</h2>
-            <p class="panel-desc">Her satır tek bir şikayet — müşteriye kanıt olarak sunulabilir.</p>
+            <h2>Şikayet Kayıtları</h2>
+            <p class="panel-desc">Her satır tek bir şikayet — detay için satıra tıkla.</p>
           </div>
         </div>
         <div class="panel-body">
+          <div id="rep-stats" class="rep-stats">
+            <div class="rep-stat"><div class="rep-stat-k">Bugün</div><div class="rep-stat-v" id="rep-today">—</div></div>
+            <div class="rep-stat"><div class="rep-stat-k">Bu Hafta</div><div class="rep-stat-v" id="rep-week">—</div></div>
+            <div class="rep-stat"><div class="rep-stat-k">Google Onay Oranı</div><div class="rep-stat-v" id="rep-rate">—</div><div class="rep-stat-sub" id="rep-rate-sub"></div></div>
+            <div class="rep-stat"><div class="rep-stat-k">En Çok Vurulan</div><div class="rep-stat-v rep-stat-domains" id="rep-top"></div></div>
+          </div>
           <div class="proof-filters">
-            <input type="text" id="proof-filter-keyword" placeholder="keyword (örn. rovbet)" />
-            <input type="text" id="proof-filter-domain" placeholder="domain (örn. cicadr.com)" />
-            <input type="text" id="proof-filter-operation" placeholder="operasyon (örn. click-mr…)" />
+            <input type="text" id="proof-filter-keyword" placeholder="keyword" />
+            <input type="text" id="proof-filter-domain" placeholder="domain" />
             <select id="proof-filter-device">
               <option value="">Tüm cihazlar</option>
               <option value="mobile">Mobil</option>
               <option value="desktop">Masaüstü</option>
             </select>
+            <select id="proof-filter-status">
+              <option value="">Tüm durumlar</option>
+              <option value="submitted">Gönderildi</option>
+              <option value="filled">Dolduruldu</option>
+              <option value="submit-failed">Başarısız</option>
+            </select>
+            <input type="date" id="proof-filter-from" title="Başlangıç tarihi" />
+            <input type="date" id="proof-filter-to" title="Bitiş tarihi" />
             <button id="proof-filter-apply" class="pager-btn">Filtrele</button>
+            <button id="proof-filter-clear" class="pager-btn">Temizle</button>
             <a id="proof-export" class="pager-btn proof-export" href="/api/reports/submitted/export" target="_blank">Excel indir ↓</a>
           </div>
           <div class="table-wrap">
@@ -411,8 +364,7 @@
                   <th>Mail</th>
                   <th>Durum</th>
                   <th>Google Onayı</th>
-                  <th>Sonuç</th>
-                  <th>Görsel</th>
+                  <th>Kanıt</th>
                 </tr>
               </thead>
               <tbody></tbody>

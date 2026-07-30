@@ -164,6 +164,8 @@ class OpsEngine {
   private readonly perDomain = new Map<string, { clicks: number; reports: number }>();
   private supervisor: Promise<void> | null = null;
   private clickSeq = 0;
+  private lastStatsSig = "";
+  private lastStatsAt = 0;
 
   constructor(deps: OpsEngineDeps) {
     this.deps = deps;
@@ -288,13 +290,31 @@ class OpsEngine {
   private async supervise(): Promise<void> {
     try {
       let ticks = 0;
+      let wasDormant = true; // pool starts dormant until the planner has work
       while (!this.stopped) {
         this.refreshPlanIfDue(false);
+        const busy = this.deps.isBusy();
+        // No active domains → no browsers. Slots only exist while the
+        // planner has work; an emptied plan drains the pool gracefully
+        // (points finish their current cycle via the stopRequested checks).
+        const dormant = busy || this.plan.length === 0;
+        if (dormant !== wasDormant) {
+          wasDormant = dormant;
+          logger.info(
+            {
+              reason: busy ? "classic-op busy" : this.plan.length === 0 ? "plan empty" : "plan active",
+              planDomains: this.plan.length,
+            },
+            dormant
+              ? "ops engine: pool dormant — browser slots stay closed"
+              : "ops engine: plan active — opening browser slots"
+          );
+        }
         // Classic campaign/scan/storm owns the browser ceiling — yield ALL.
-        if (this.deps.isBusy()) {
+        if (busy) {
           for (const slot of this.slots.values()) slot.stopRequested = true;
         }
-        const desired = this.deps.isBusy() ? 0 : this.effectiveBrowsers();
+        const desired = dormant ? 0 : this.effectiveBrowsers();
         if (this.slots.size > desired) {
           let toShed = this.slots.size - desired;
           for (const slot of this.slots.values()) {
@@ -305,7 +325,7 @@ class OpsEngine {
             }
           }
         }
-        while (!this.stopped && !this.deps.isBusy() && this.slots.size < this.effectiveBrowsers()) {
+        while (!this.stopped && !dormant && this.slots.size < desired) {
           const opened = await this.openSlot();
           if (!opened) break;
           // Stagger browser opens — the AdsPower API hates herds.
@@ -456,6 +476,7 @@ class OpsEngine {
       await this.closeSlot(slot);
     })();
     logger.info({ profileId: pick.profileId, device: pick.device, tabs: pages.length }, "ops engine: browser slot opened");
+    this.emitStats(); // pool size changed — report immediately (gated)
     return true;
   }
 
@@ -490,6 +511,7 @@ class OpsEngine {
     }
     await closeProfile(this.workerCtx, slot.session, slot.profileId);
     logger.info({ profileId: slot.profileId }, "ops engine: browser slot closed");
+    this.emitStats(); // pool size changed — report immediately (gated)
   }
 
   // ── point (tab) loop ───────────────────────────────────────────────
@@ -903,6 +925,30 @@ class OpsEngine {
 
   private emitStats(): void {
     const s = this.status();
+    const now = Date.now();
+    // Anti-spam: emit on meaningful change, on a 30s cadence while
+    // producing, and at most a 10-minute "waiting" heartbeat when fully idle.
+    const sig = [
+      s.browsers,
+      s.activePoints,
+      s.totals.clicks,
+      s.totals.reports,
+      s.totals.failed,
+      s.totals.skipped,
+      s.totals.queriesLastHour,
+      this.plan.map((d) => d.domain).join(","),
+    ].join("|");
+    const idle = s.browsers === 0 && s.activePoints === 0;
+    const changed = sig !== this.lastStatsSig;
+    const dueActive = !idle && now - this.lastStatsAt >= 30_000;
+    const dueIdle = idle && now - this.lastStatsAt >= 10 * 60_000;
+    if (!changed && !dueActive && !dueIdle) return;
+    this.lastStatsSig = sig;
+    this.lastStatsAt = now;
+    const message =
+      idle && this.plan.length === 0
+        ? `ops · beklemede · aktif domain yok · toplam ${s.totals.clicks} tık · ${s.totals.reports} rapor`
+        : `ops · ${s.browsers} tarayıcı · ${s.activePoints} nokta · ${s.totals.clicks} tık · ${s.totals.reports} rapor · ${s.totals.queriesLastHour} sorgu/saat`;
     this.deps.emit({
       type: "ops-stats",
       runId: this.runId,
@@ -910,7 +956,7 @@ class OpsEngine {
       activePoints: s.activePoints,
       totals: s.totals,
       perDomain: s.perDomain,
-      message: `ops · ${s.browsers} tarayıcı · ${s.activePoints} nokta · ${s.totals.clicks} tık · ${s.totals.reports} rapor · ${s.totals.queriesLastHour} sorgu/saat`,
+      message,
     });
   }
 }

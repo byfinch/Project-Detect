@@ -232,109 +232,8 @@ function updateScheduledInfo(ss) {
   el.textContent = `Sıradaki zamanlanmış tarama: ${next} · markalar: herabet, rovbet, napolibet, primebahis, vegasslot`;
 }
 
-function updateOps(ops) {
-  const focusBadge = document.getElementById("focus-status-badge");
-  const focusMeta = document.getElementById("focus-status");
-  const stopFocus = document.getElementById("btn-stop-focus");
-
-  if (ops.campaign?.status === "running") {
-    focusBadge.textContent = "AKTİF";
-    focusBadge.className = "op-status run";
-    focusMeta.textContent = `${ops.campaign.focusDomain || "—"} · pencere #${ops.campaign.windowIndex || 1} · ${ops.campaign.windowMinutes || 120}dk`;
-    stopFocus.disabled = focusStopping;
-    if (!focusStopping) stopFocus.innerHTML = `<span class="btn-icon">■</span> Durdur`;
-  } else {
-    focusBadge.textContent = "PASİF";
-    focusBadge.className = "op-status";
-    focusMeta.textContent = "Beklemede";
-    stopFocus.disabled = true;
-    if (focusStopping) {
-      focusStopping = false;
-      stopFocus.innerHTML = `<span class="btn-icon">■</span> Durdur`;
-    }
-  }
-}
-
 let refreshInFlight = false;
 let lastRefreshAt = 0;
-
-let stormStopping = false;
-
-function updateStorm(storm) {
-  const badge = document.getElementById("storm-status-badge");
-  const meta = document.getElementById("storm-status");
-  const startBtn = document.getElementById("btn-start-storm");
-  const stopBtn = document.getElementById("btn-stop-storm");
-  const form = document.getElementById("storm-form");
-  if (!badge || !meta) return;
-  if (storm?.running) {
-    const t = storm.totals || { clicks: 0, reports: 0 };
-    badge.textContent = "AKTİF";
-    badge.className = "op-status run";
-    meta.textContent = `${storm.targetDomain || "—"} · ${storm.activeSessions ?? 0} oturum · ${t.clicks} tık · ${t.reports} rapor · saatlik ${storm.clicksPerHour ?? 0}`;
-    if (startBtn) startBtn.disabled = true;
-    if (stopBtn) {
-      stopBtn.disabled = stormStopping;
-      if (!stormStopping) stopBtn.innerHTML = `<span class="btn-icon">■</span> Durdur`;
-    }
-    if (form) form.classList.add("disabled");
-  } else {
-    badge.textContent = "PASİF";
-    badge.className = "op-status";
-    meta.textContent = storm?.totals && (storm.totals.clicks || storm.totals.reports)
-      ? `Son: ${storm.targetDomain} · ${storm.totals.clicks} tık · ${storm.totals.reports} rapor`
-      : "Beklemede";
-    if (startBtn) startBtn.disabled = false;
-    if (stopBtn) {
-      stopBtn.disabled = true;
-      if (stormStopping) {
-        stormStopping = false;
-        stopBtn.innerHTML = `<span class="btn-icon">■</span> Durdur`;
-      }
-    }
-    if (form) form.classList.remove("disabled");
-  }
-}
-
-async function startStorm() {
-  const msg = document.getElementById("storm-form-msg");
-  const keywords = document.getElementById("storm-keywords").value.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
-  const targetDomain = document.getElementById("storm-domain").value.trim();
-  const device = document.getElementById("storm-device").value;
-  if (!keywords.length || !targetDomain) {
-    if (msg) msg.textContent = "keyword seti + hedef domain gerekli";
-    return;
-  }
-  if (msg) msg.textContent = "Başlatılıyor…";
-  try {
-    const res = await API.post("/api/storm/start", { keywords, targetDomain, device });
-    if (msg) msg.textContent = `Başladı · run #${res.runId}`;
-    log("info", `storm başladı · ${targetDomain} · ${device} · ${keywords.length} keyword`);
-    await refresh(true);
-  } catch (err) {
-    if (msg) msg.textContent = err.message;
-    log("err", `storm başlatma: ${err.message}`);
-  }
-}
-
-async function stopStorm() {
-  if (stormStopping) return; // no spam — one stop request at a time
-  stormStopping = true;
-  const btn = document.getElementById("btn-stop-storm");
-  if (btn) {
-    btn.disabled = true;
-    btn.innerHTML = `Durduruluyor`;
-  }
-  try {
-    await API.post("/api/storm/stop", {});
-    log("warn", "storm durduruldu");
-    await refresh(true);
-  } catch (err) {
-    log("err", `storm durdurma: ${err.message}`);
-    stormStopping = false;
-    if (btn) btn.innerHTML = `<span class="btn-icon">■</span> Durdur`;
-  }
-}
 
 async function refresh(force = false) {
   if (refreshInFlight) return; // pager double-click guard — no parallel fetches
@@ -346,15 +245,13 @@ async function refresh(force = false) {
   refreshInFlight = true;
   document.querySelectorAll(".pager-btn").forEach((b) => b.classList.add("loading"));
   try {
-    const proofQs = proofFilterQs();
-    const [ops, complaintRes, opResultsRes, scansRes, proofRes, healthRes, stormRes] = await Promise.all([
+    const proofQs = reportFilterQs();
+    const [ops, opResultsRes, scansRes, proofRes, healthRes] = await Promise.all([
       API.get("/api/ops"),
-      API.get("/api/reports/complaints/packs").catch(() => ({ packs: [] })),
       API.get(`/api/ops/summary?page=${opResultsPage}&limit=${OP_RESULTS_LIMIT}`).catch(() => ({ results: [], total: 0, page: 1, limit: OP_RESULTS_LIMIT })),
       API.get(`/api/scans/paged?page=${scansPage}&limit=${SCANS_PER_PAGE}`).catch(() => ({ scans: [], total: 0, page: 1, limit: SCANS_PER_PAGE })),
       API.get(`/api/reports/submitted?page=${proofPage}&limit=${PROOF_LIMIT}${proofQs}`).catch(() => ({ results: [], total: 0, page: 1, limit: PROOF_LIMIT })),
       API.get("/api/profiles/health").catch(() => ({ profiles: [] })),
-      API.get("/api/storm/status").catch(() => ({ storm: { running: false } })),
     ]);
     const adsPill = document.getElementById("pill-ads");
     if (adsPill) {
@@ -389,8 +286,8 @@ async function refresh(force = false) {
         const lines = [
           `Mail havuzu · aktif ${ep.active} / hedef ${ep.minSize} (toplam ${ep.total})`,
           `Taze: ${ep.fresh} · son 24s kullanım: ${ep.usedLast24h}`,
-          `Üretim: son 1 saatte ${ep.createdLastHour} / limit ${ep.refillPerHour}`,
         ];
+        if (ep.createdLastHour > 0) lines.push(`Üretim: son 1 saatte ${ep.createdLastHour} / limit ${ep.refillPerHour}`);
         if (ep.refillBackoffUntil) lines.push(`RATE-LIMIT: ${ep.refillBackoffUntil} — üretim duraklatıldı`);
         mp.title = lines.join("\n");
       } else {
@@ -399,8 +296,6 @@ async function refresh(force = false) {
       }
     }
     isScanRunningFromOps = isScanRunning(ops.jobs);
-    updateOps(ops);
-    updateStorm(stormRes?.storm);
     updateScheduledInfo(ops.scheduledScan);
     renderJobs(ops.jobs);
     renderScans(scansRes);
@@ -461,27 +356,6 @@ async function onScanSubmit(e) {
   }
 }
 
-let focusStopping = false;
-
-async function stopFocus() {
-  if (focusStopping) return; // no spam — one stop request at a time
-  focusStopping = true;
-  const btn = document.getElementById("btn-stop-focus");
-  if (btn) {
-    btn.disabled = true;
-    btn.innerHTML = `Durduruluyor`;
-  }
-  try {
-    await API.post("/api/campaign/stop", {});
-    log("warn", "focus durduruluyor");
-    await refresh(true);
-  } catch (err) {
-    log("err", `focus durdurma: ${err.message}`);
-    focusStopping = false;
-    if (btn) btn.innerHTML = `<span class="btn-icon">■</span> Durdur`;
-  }
-}
-
 function setupSSE() {
   const es = new EventSource("/api/events");
   es.onmessage = (e) => {
@@ -497,7 +371,7 @@ function setupSSE() {
       if (["ops-point", "ops-click", "ops-valve", "ops-enabled"].includes(d.type)) {
         refreshOpsMode();
       }
-      if (["scan-completed", "scan-started", "click-completed", "click-done", "campaign-rescan-done", "storm-started", "storm-completed", "storm-click", "storm-progress"].includes(d.type)) {
+      if (["scan-completed", "scan-started", "click-completed", "click-done", "campaign-rescan-done"].includes(d.type)) {
         refresh();
       }
     } catch {}
@@ -517,7 +391,7 @@ function eventLevel(t) {
 let opResultsPage = 1;
 const OP_RESULTS_LIMIT = 5;
 let proofPage = 1;
-const PROOF_LIMIT = 5;
+const PROOF_LIMIT = 25;
 
 /** Compact date-time for tight table cells/chips: "24.07 04:52". */
 function fmtDT(iso) {
@@ -528,16 +402,20 @@ function fmtDT(iso) {
   return `${dd} ${tt}`;
 }
 
-function proofFilterQs() {
+function reportFilterQs() {
   const kw = document.getElementById("proof-filter-keyword")?.value.trim();
   const dom = document.getElementById("proof-filter-domain")?.value.trim();
-  const op = document.getElementById("proof-filter-operation")?.value.trim();
   const dev = document.getElementById("proof-filter-device")?.value;
+  const st = document.getElementById("proof-filter-status")?.value;
+  const df = document.getElementById("proof-filter-from")?.value;
+  const dt = document.getElementById("proof-filter-to")?.value;
   let qs = "";
   if (kw) qs += `&keyword=${encodeURIComponent(kw)}`;
   if (dom) qs += `&domain=${encodeURIComponent(dom)}`;
-  if (op) qs += `&operation=${encodeURIComponent(op)}`;
   if (dev) qs += `&device=${encodeURIComponent(dev)}`;
+  if (st) qs += `&status=${encodeURIComponent(st)}`;
+  if (df) qs += `&dateFrom=${encodeURIComponent(df)}`;
+  if (dt) qs += `&dateTo=${encodeURIComponent(dt)}`;
   return qs;
 }
 
@@ -774,10 +652,40 @@ function proofBadge(status) {
   return `<span class="badge stale">${esc(status)}</span>`;
 }
 
+function googleCell(r) {
+  if (r.googleNotifId) {
+    const inner = `<span class="badge run" title="Google bildirim no">#${esc(r.googleNotifId)}</span>`;
+    return r.email
+      ? `<a href="/api/reports/email-html?address=${encodeURIComponent(r.email)}" target="_blank" onclick="event.stopPropagation()" style="text-decoration:none" title="Google onay mailini gör">${inner}</a>`
+      : inner;
+  }
+  return r.email
+    ? `<span class="muted rep-gcheck" data-id="${r.id}">kontrol…</span>`
+    : `<span class="muted">—</span>`;
+}
+
+function renderReportStats(s) {
+  if (!s) return;
+  const el = (id) => document.getElementById(id);
+  if (el("rep-today")) el("rep-today").textContent = s.today ?? 0;
+  if (el("rep-week")) el("rep-week").textContent = s.week ?? 0;
+  const total = Number(s.total) || 0;
+  const confirmed = Number(s.confirmed) || 0;
+  if (el("rep-rate")) el("rep-rate").textContent = total > 0 ? `%${Math.round((confirmed / total) * 100)}` : "—";
+  if (el("rep-rate-sub")) el("rep-rate-sub").textContent = total > 0 ? `${confirmed}/${total} onaylı` : "";
+  if (el("rep-top")) {
+    const tops = (s.topDomains || []).filter((d) => d.domain);
+    el("rep-top").innerHTML = tops.length
+      ? tops.map((d) => `<span class="rep-domain-chip" title="${esc(d.domain)}">${esc(d.domain)} <b>${d.n}</b></span>`).join("")
+      : "—";
+  }
+}
+
 function renderProof(data) {
   const tbody = document.querySelector("#tbl-proof tbody");
   const empty = document.getElementById("proof-empty");
   if (!tbody || !empty) return;
+  renderReportStats(data.summary);
   const results = data.results || [];
   if (!results.length) {
     tbody.innerHTML = "";
@@ -787,21 +695,134 @@ function renderProof(data) {
   }
   empty.style.display = "none";
   tbody.innerHTML = results
-    .map(
-      (r) => `<tr>
-        <td class="muted">${r.capturedAt ? new Date(r.capturedAt).toLocaleString("tr-TR") : "—"}</td>
+    .map((r) => {
+      const thumbUrl = `/api/reports/thumb?run=${r.runId}&job=${encodeURIComponent(r.jobId)}&name=04-report-submitted.jpg`;
+      return `<tr class="rep-row" data-id="${r.id}" title="Detay için tıkla">
+        <td class="muted">${esc(fmtDT(r.capturedAt))}</td>
         <td>${esc(r.keyword)}</td>
         <td>${esc(r.domain)}</td>
         <td>${esc(r.device)}</td>
         <td class="mono" style="font-size:11px">${esc(r.email || "—")}</td>
         <td>${proofBadge(r.reportStatus)}</td>
-        <td class="mono">${r.googleNotifId ? `<a href="/api/reports/email-html?address=${encodeURIComponent(r.email || "")}" target="_blank" style="color:inherit;text-decoration:none" title="Google onay mailini gör">#${esc(r.googleNotifId)} ↗</a>` : '<span class="muted">bekleniyor</span>'}</td>
-        <td>${r.googleOutcome ? `<span class="badge ok" title="${esc(r.googleOutcome)}">${esc(r.googleOutcome.slice(0, 40))}</span>` : '<span class="muted">inceleniyor</span>'}</td>
-        <td>${r.reportStatus === "submitted" ? `<a href="${esc(r.evidenceUrl)}" target="_blank" class="pager-btn" style="text-decoration:none;padding:4px 9px;font-size:11px">Gör</a>` : ""}</td>
-      </tr>`
-    )
+        <td class="mono">${googleCell(r)}</td>
+        <td>${r.reportStatus === "submitted"
+          ? `<img class="rep-thumb" loading="lazy" src="${thumbUrl}" alt="kanıt"
+              onerror="if(!this.dataset.fb){this.dataset.fb=1;this.src=this.src.replace('.jpg','.png')}else{this.outerHTML='<span class=muted>—</span>'}" />`
+          : '<span class="muted">—</span>'}</td>
+      </tr>`;
+    })
     .join("");
+  tbody.querySelectorAll(".rep-row").forEach((row) => {
+    row.addEventListener("click", () => openReportDetail(Number(row.dataset.id)));
+  });
   renderProofPager(data.total || results.length, data.page || 1, data.limit || PROOF_LIMIT);
+  lazyGoogleChecks(results);
+}
+
+/**
+ * Google onayı henüz bilinmeyen satırlar için tembel kontrol — liste render'ı
+ * asla mail.tm'i beklemez; onay rozetleri arka planda dolar (3'lü eşzamanlılık).
+ */
+function lazyGoogleChecks(results) {
+  if (document.getElementById("view-proof")?.classList.contains("hidden")) return;
+  const pending = results.filter((r) => !r.googleNotifId && r.email).slice(0, PROOF_LIMIT);
+  let idx = 0;
+  const next = async () => {
+    const r = pending[idx++];
+    if (!r) return;
+    try {
+      const g = await API.get(`/api/reports/google-check?id=${r.id}`);
+      const cell = document.querySelector(`.rep-gcheck[data-id="${r.id}"]`);
+      if (cell) {
+        cell.outerHTML = g.googleNotifId
+          ? googleCell({ ...r, googleNotifId: g.googleNotifId })
+          : `<span class="muted">bekleniyor</span>`;
+      }
+      if (g.googleNotifId) {
+        // Özet şeridindeki onay oranı DB'den geliyor — bir satır dolduysa tazele.
+        const rateEl = document.getElementById("rep-rate");
+        if (rateEl && rateEl.dataset.pendingRefresh !== "1") {
+          rateEl.dataset.pendingRefresh = "1";
+          setTimeout(() => { delete rateEl.dataset.pendingRefresh; refresh(true); }, 4000);
+        }
+      }
+    } catch {
+      const cell = document.querySelector(`.rep-gcheck[data-id="${r.id}"]`);
+      if (cell) cell.outerHTML = `<span class="muted">bekleniyor</span>`;
+    }
+    await next();
+  };
+  void Promise.all([next(), next(), next()]);
+}
+
+/* ── Rapor detay görünümü (müşteriye sunulabilir, yazdırılabilir) ── */
+const EV_LABELS = [
+  [/^01-report-opened/, "1 · Şikayet formu açıldı"],
+  [/^03-report-filled/, "2 · Form dolduruldu (yorum + mail)"],
+  [/^04-report-submitted/, "3 · Gönderim onayı"],
+  [/^02-no-dialog/, "Form bulunamadı"],
+];
+function evLabel(name) {
+  for (const [re, label] of EV_LABELS) if (re.test(name)) return label;
+  return name.replace(/\.(jpe?g|png)$/i, "");
+}
+
+let reportDetailLoading = false;
+async function openReportDetail(id) {
+  if (reportDetailLoading || !id) return;
+  reportDetailLoading = true;
+  const modal = document.getElementById("op-detail-modal");
+  const body = document.getElementById("op-detail-body");
+  const title = document.getElementById("op-detail-title");
+  if (!modal || !body || !title) { reportDetailLoading = false; return; }
+  title.textContent = `Şikayet #${id}`;
+  body.innerHTML = `<div class="empty">Yükleniyor…</div>`;
+  modal.classList.remove("hidden");
+  document.documentElement.classList.add("modal-open");
+  document.body.classList.add("modal-open");
+  try {
+    const d = await API.get(`/api/reports/detail?id=${id}`);
+    title.textContent = `Şikayet #${d.id} · ${d.domain}`;
+    const metaEl = document.getElementById("op-detail-meta");
+    if (metaEl) {
+      metaEl.textContent = `${new Date(d.capturedAt).toLocaleString("tr-TR")} · ${d.keyword} · ${d.device}${d.operationId ? " · " + d.operationId : ""}`;
+    }
+    const chipHtml = (k, v, hero = false) =>
+      `<div class="op-chip${hero ? " hero" : ""}"><div class="op-chip-k">${k}</div><div class="op-chip-v">${v}</div></div>`;
+    const gBadge = d.googleNotifId
+      ? `<span class="badge run">#${esc(d.googleNotifId)}</span>`
+      : `<span class="muted">bekleniyor</span>`;
+    const chips = [
+      chipHtml("Durum", proofBadge(d.reportStatus), true),
+      chipHtml("Google Onayı", gBadge, true),
+      chipHtml("Kullanılan Mail", esc(d.email || "—")),
+      chipHtml("Cihaz", esc(d.device)),
+      chipHtml("Profil", esc(d.profileId.length > 14 ? "…" + d.profileId.slice(-10) : d.profileId)),
+    ].join("");
+    const evItems = (d.evidence || [])
+      .filter((e) => !/^dbg-/.test(e.name))
+      .map((e) => `<figure class="ev-item">
+        <figcaption class="ev-label">${esc(evLabel(e.name))}</figcaption>
+        <a href="${esc(e.url)}" target="_blank"><img loading="lazy" src="${esc(e.url)}" alt="${esc(evLabel(e.name))}" /></a>
+      </figure>`)
+      .join("");
+    const mailLink = d.email
+      ? `<a class="pager-btn" href="/api/reports/email-html?address=${encodeURIComponent(d.email)}" target="_blank">Google onay maili ↗</a>`
+      : "";
+    body.innerHTML = `
+      <div class="rep-detail-actions">
+        ${mailLink}
+        <button class="pager-btn" id="rep-print">Yazdır ⎙</button>
+      </div>
+      <div class="op-chips">${chips}</div>
+      <h3 class="op-sec">Kanıt Seti</h3>
+      <div class="ev-grid">${evItems || `<div class="empty">Kanıt görseli yok</div>`}</div>`;
+    document.getElementById("rep-print")?.addEventListener("click", () => window.print());
+  } catch (err) {
+    body.innerHTML = `<div class="empty">Detay yüklenemedi: ${esc(String(err))}</div>`;
+  } finally {
+    reportDetailLoading = false;
+  }
 }
 
 /* ── Ops mode (yeni birleşik sistem: gözcü + planlayıcı + valf + motor) ── */
@@ -1089,12 +1110,23 @@ function init() {
   document.getElementById("proof-filter-apply")?.addEventListener("click", () => {
     proofPage = 1;
     const exportBtn = document.getElementById("proof-export");
-    if (exportBtn) exportBtn.href = `/api/reports/submitted/export?${proofFilterQs().replace(/^&/, "")}`;
+    if (exportBtn) exportBtn.href = `/api/reports/submitted/export?${reportFilterQs().replace(/^&/, "")}`;
     refresh(true);
   });
-  document.getElementById("btn-stop-focus").addEventListener("click", stopFocus);
-  document.getElementById("btn-start-storm")?.addEventListener("click", startStorm);
-  document.getElementById("btn-stop-storm")?.addEventListener("click", stopStorm);
+  document.getElementById("proof-filter-clear")?.addEventListener("click", () => {
+    for (const id of ["proof-filter-keyword", "proof-filter-domain", "proof-filter-from", "proof-filter-to"]) {
+      const el = document.getElementById(id);
+      if (el) el.value = "";
+    }
+    for (const id of ["proof-filter-device", "proof-filter-status"]) {
+      const el = document.getElementById(id);
+      if (el) el.value = "";
+    }
+    proofPage = 1;
+    const exportBtn = document.getElementById("proof-export");
+    if (exportBtn) exportBtn.href = "/api/reports/submitted/export";
+    refresh(true);
+  });
   const logoutBtn = document.getElementById("btn-logout");
   if (logoutBtn) {
     logoutBtn.addEventListener("click", async () => {
