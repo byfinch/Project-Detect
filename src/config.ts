@@ -111,6 +111,14 @@ const ConfigSchema = z.object({
     swarmReportsPerProfile: z.number().int().nonnegative().default(10),
     swarmMinDelayMs: z.number().int().nonnegative().default(30000),
     swarmMaxDelayMs: z.number().int().nonnegative().default(90000),
+    /**
+     * Domain hunter: brands that finish the scan with 0 ads get a second-chance
+     * pass over numbered/suffixed queries ("rovbet365", "rovbet güncel giriş").
+     * Pure-digit entries concatenate onto the brand; word entries space-join.
+     */
+    hunterVariants: z.array(z.string()).default(["1", "365", "7", "güncel giriş"]),
+    /** Auto-run the hunter pass for 0-ad brands after a scan (manual + scheduled). */
+    autoHunt: z.boolean().default(true),
   }),
   click: z.object({
     mode: z.enum(["conservative", "adaptive", "aggressive"]),
@@ -285,6 +293,15 @@ const ConfigSchema = z.object({
     })
     .default({}),
   bettingKeywords: z.array(z.string()),
+  /**
+   * Interest pilot: a handful of profiles get light betting-neighbour
+   * searches ("spor bahisleri", "canlı skor") + organic result visits a few
+   * times a week, so Google keeps serving them betting ads. Empty = disabled.
+   */
+  interestPilotProfiles: z.array(z.string()).default([]),
+  interestPilotKeywords: z.array(z.string()).default(["spor bahisleri", "canlı skor", "maç sonuçları"]),
+  /** Hard daily Google-query ceiling per pilot profile (IP budget guard). */
+  interestPilotMaxQueriesPerDay: z.number().int().positive().default(5),
 });
 
 export type AppConfig = z.infer<typeof ConfigSchema>;
@@ -373,6 +390,10 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       swarmReportsPerProfile: file.scan?.swarmReportsPerProfile ?? 10,
       swarmMinDelayMs: file.scan?.swarmMinDelayMs ?? 30000,
       swarmMaxDelayMs: file.scan?.swarmMaxDelayMs ?? 90000,
+      hunterVariants: Array.isArray(file.scan?.hunterVariants)
+        ? (file.scan.hunterVariants as string[]).map(String)
+        : ["1", "365", "7", "güncel giriş"],
+      autoHunt: file.scan?.autoHunt ?? true,
     },
     click: {
       mode: file.click?.mode ?? "adaptive",
@@ -473,6 +494,13 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       keywordRotateEvery: file.ops?.keywordRotateEvery ?? 4,
     },
     bettingKeywords: file.bettingKeywords ?? [],
+    interestPilotProfiles: Array.isArray(file.interestPilotProfiles)
+      ? (file.interestPilotProfiles as string[]).map(String)
+      : [],
+    interestPilotKeywords: Array.isArray(file.interestPilotKeywords)
+      ? (file.interestPilotKeywords as string[]).map(String)
+      : ["spor bahisleri", "canlı skor", "maç sonuçları"],
+    interestPilotMaxQueriesPerDay: file.interestPilotMaxQueriesPerDay ?? 5,
     ...overrides,
   };
 

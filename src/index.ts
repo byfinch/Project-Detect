@@ -96,6 +96,8 @@ program
     if (opts.clearProfile === false) config.scan.clearProfileData = false;
 
     let keywords = loadKeywords(resolveKeywordFile(opts.keywords));
+    // Raw brand roots feed the domain hunter (numbered variants on 0-ad brands).
+    const huntBrands = [...keywords];
     if (opts.expandBrands) {
       keywords = expandBrandKeywords(keywords);
     }
@@ -147,6 +149,7 @@ program
     const summary = await runScan(config, keywords, undefined, {
       onlyProfileNames: onlyProfileNames.length ? onlyProfileNames : undefined,
       protectPool: opts.protectPool || onlyProfileNames.length > 0,
+      huntBrands,
     });
 
     console.log("\n" + "=".repeat(64));

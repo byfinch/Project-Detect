@@ -53,7 +53,9 @@
     "swarmClicksPerProfile": 10,
     "swarmReportsPerProfile": 10,
     "swarmMinDelayMs": 30000,
-    "swarmMaxDelayMs": 90000
+    "swarmMaxDelayMs": 90000,
+    "hunterVariants": ["1", "365", "7", "güncel giriş"],
+    "autoHunt": true
   },
   "click": {
     "mode": "adaptive",
@@ -153,5 +155,8 @@
     "uyelik",
     "kayit ol",
     "hemen katil"
-  ]
+  ],
+  "interestPilotProfiles": [],
+  "interestPilotKeywords": ["spor bahisleri", "canlı skor", "maç sonuçları"],
+  "interestPilotMaxQueriesPerDay": 5
 }

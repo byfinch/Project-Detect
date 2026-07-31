@@ -197,12 +197,14 @@ function toScore(key: string, domain: DomainState): RichnessScore {
   };
 }
 
-/** Match a scanned keyword back to its brand (base query or "<brand> <suffix>"). */
+/** Match a scanned keyword back to its brand (base query, "<brand> <suffix>", or numbered "<brand><N>"). */
 function brandOfKeyword(keyword: string, brandPriority: string[]): string | null {
   const kw = keyword.toLocaleLowerCase("tr");
   for (const b of brandPriority) {
     const brand = b.toLocaleLowerCase("tr");
     if (kw === brand || kw.startsWith(`${brand} `)) return brand;
+    // Numbered-domain hunter queries ("rovbet365") still belong to the brand.
+    if (kw.startsWith(brand) && /^\d+$/.test(kw.slice(brand.length))) return brand;
   }
   return null;
 }

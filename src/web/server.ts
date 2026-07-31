@@ -205,6 +205,9 @@ function isScanRunning(jobList: JobState[] = Array.from(jobs.values())): boolean
   return jobList.some((j) => j.type === "scan" && j.status === "running");
 }
 
+/** Interest pilot feeding round in flight (guards the cron against overlaps). */
+let interestPilotRunning = false;
+
 async function isScanRunningInDb(outputDir: string): Promise<boolean> {
   try {
     const store = new Store(outputDir);
@@ -1987,7 +1990,7 @@ export function createWebServer(port: number): void {
               });
             }
           },
-            { protectPool: true, signal: abortController.signal }
+            { protectPool: true, signal: abortController.signal, huntBrands: opts.brands }
           );
         } finally {
           scanAbortControllers.delete(jobId);
@@ -2164,6 +2167,52 @@ export function createWebServer(port: number): void {
   }
 
   startScheduledScanCron();
+
+  /**
+   * Interest pilot cron: a few pilot profiles get light betting-neighbour
+   * searches + organic visits a couple of times a week, so Google keeps
+   * serving them betting ads. Runs only when the machine is idle (no scan,
+   * click job, or campaign) and at most once per 48h. Disabled when
+   * config.interestPilotProfiles is empty.
+   */
+  function startInterestPilotCron(): void {
+    const CHECK_MS = 60 * 60_000;
+    const MIN_GAP_MS = 48 * 3600_000;
+    setInterval(() => {
+      void (async () => {
+        const pilots = config.interestPilotProfiles ?? [];
+        if (pilots.length === 0 || interestPilotRunning) return;
+        if (isScanRunning() || (await isScanRunningInDb(config.output.dir))) return;
+        const clickOpRunning =
+          activeCampaign?.status === "running" ||
+          Array.from(jobs.values()).some((j) => j.type === "click" && j.status === "running");
+        if (clickOpRunning) return;
+        try {
+          const { readInterestPilotState } = await import("../captcha/recovery.js");
+          const lastRun = readInterestPilotState(config.output.dir).lastRun;
+          if (lastRun?.startedAt && Date.now() - new Date(lastRun.startedAt).getTime() < MIN_GAP_MS) return;
+        } catch {
+          /* no state yet — first run allowed */
+        }
+        interestPilotRunning = true;
+        logger.info({ pilots: pilots.length }, "interest pilot: starting light feeding round (idle window)");
+        try {
+          const { runInterestPilotPass } = await import("../captcha/recovery.js");
+          const report = await runInterestPilotPass(config);
+          logger.info(
+            { profiles: report.profiles.length, ok: report.profiles.filter((r) => r.status === "ok").length },
+            "interest pilot: feeding round finished"
+          );
+        } catch (err) {
+          logger.warn({ err: String(err) }, "interest pilot: feeding round failed");
+        } finally {
+          interestPilotRunning = false;
+        }
+      })();
+    }, CHECK_MS).unref();
+  }
+
+  startInterestPilotCron();
 
   /**
    * Idle profile reaper: scan/click jobs sometimes leave AdsPower browsers
@@ -2519,6 +2568,30 @@ export function createWebServer(port: number): void {
   app.get("/api/ops/engine", (_req: Request, res: Response) => {
     try {
       res.json({ enabled: opsEnabled, engine: getOpsEngineStatus() });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  /** Interest pilot: configured pilot profiles + last feeding round (state file). */
+  app.get("/api/interest/status", (_req: Request, res: Response) => {
+    try {
+      const pilots = config.interestPilotProfiles ?? [];
+      let state: { lastRun: unknown; daily: Record<string, Record<string, number>> } = { lastRun: null, daily: {} };
+      try {
+        const raw = readFileSync(resolve(config.output.dir, "interest-pilot.json"), "utf8");
+        state = JSON.parse(raw) as typeof state;
+      } catch {
+        /* no round yet */
+      }
+      res.json({
+        enabled: pilots.length > 0,
+        running: interestPilotRunning,
+        pilotProfiles: pilots,
+        maxQueriesPerDay: config.interestPilotMaxQueriesPerDay,
+        lastRun: state.lastRun ?? null,
+        daily: state.daily ?? {},
+      });
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }

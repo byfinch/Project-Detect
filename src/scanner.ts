@@ -28,6 +28,7 @@ import { jitterDelay, sleep } from "./util/time.js";
 import { browseSerpNaturally } from "./click/behavior.js";
 import { deviceOfProfile } from "./click/pool.js";
 import { personaFor } from "./util/persona.js";
+import { AUTO_VARIANT_SUFFIXES, hunterKeywordsForBrand } from "./util/keywords.js";
 
 /** How many different IPs to try for a keyword that hard-blocks (global default). */
 const KEYWORD_IP_RETRIES = 3;
@@ -96,6 +97,8 @@ interface ScanCtx {
   byDevice: Record<string, number>;
   captchaKeywords: string[];
   bettingHits: BettingHit[];
+  /** Ads found per device::keyword — the domain hunter reads this to find 0-ad brands. */
+  adsByKeyword: Record<string, number>;
   /** If set, only these AdsPower profile names may be used (safe clean pool). */
   onlyProfileNames: Set<string> | null;
   /** When true, captcha does not burn other clean IPs on the same keyword. */
@@ -122,6 +125,12 @@ export interface RunScanOpts {
    * a classic scan and never block on it.
    */
   scanNote?: string;
+  /**
+   * Brand list for the domain hunter. After the main scan, brands that
+   * produced 0 ads on a device get one extra pass over variant + numbered
+   * queries (config scan.hunterVariants). Gated by scan.autoHunt.
+   */
+  huntBrands?: string[];
 }
 
 class AsyncMutex {
@@ -621,6 +630,8 @@ async function scanOneKeyword(
     store.insertResult(scanId, ad);
     await ctx.mutex.run(() => {
       ctx.totalAds++;
+      const kwKey = `${device}::${keyword}`;
+      ctx.adsByKeyword[kwKey] = (ctx.adsByKeyword[kwKey] ?? 0) + 1;
       ctx.byDevice[device] = (ctx.byDevice[device] ?? 0) + 1;
       if (ad.isBettingGuess) {
         ctx.bettingAds++;
@@ -1613,6 +1624,7 @@ export async function runScan(
     byDevice: {},
     captchaKeywords: [],
     bettingHits: [],
+    adsByKeyword: {},
     onlyProfileNames,
     protectPool,
     profileNames: new Map(),
@@ -1643,10 +1655,59 @@ export async function runScan(
     runDeviceScan(ctx, ads, device, keywords, deviceConcurrencies[idx]!, onProgress, opts.signal)
   );
 
+  /**
+   * Domain hunter (second chance): brands that produced 0 ads on a device get
+   * one extra pass over light variant suffixes (giriş/bonus/güncel — skipped
+   * when already scanned via expandBrands) plus numbered-domain patterns
+   * ("rovbet365", "rovbet güncel giriş"). Betting crews rotate numbered
+   * domains, so the ad often lives on those auctions while the root is dead.
+   * Findings are recorded as normal results carrying the real hunt keyword.
+   */
+  const huntBrands = config.scan.autoHunt && opts.huntBrands?.length ? opts.huntBrands : [];
+  const scannedSet = new Set(keywords.map((k) => k.toLocaleLowerCase("tr")));
+  const hunterPasses: Array<{ device: Device; idx: number; keywords: string[] }> = [];
+  for (const brand of huntBrands) {
+    const base = brand.trim().toLocaleLowerCase("tr");
+    if (!base) continue;
+    const brandKws = keywords.filter((k) => k === base || k.startsWith(`${base} `));
+    if (brandKws.length === 0) continue; // brand was not part of this scan
+    const candidates = [
+      ...AUTO_VARIANT_SUFFIXES.map((s) => `${base} ${s}`),
+      ...hunterKeywordsForBrand(base, config.scan.hunterVariants),
+    ].filter((kw) => !scannedSet.has(kw));
+    if (candidates.length === 0) continue;
+    config.devices.forEach((device, idx) => {
+      const zeroAds = brandKws.every((k) => (ctx.adsByKeyword[`${device}::${k}`] ?? 0) === 0);
+      if (!zeroAds) return;
+      const pass = hunterPasses.find((h) => h.device === device);
+      if (pass) {
+        for (const kw of candidates) if (!pass.keywords.includes(kw)) pass.keywords.push(kw);
+      } else {
+        hunterPasses.push({ device, idx, keywords: [...candidates] });
+      }
+    });
+  }
+
   // finishScan + store.close must happen even when the abort fires mid-scan.
   let reportPaths: { json?: string; csv?: string } = {};
   try {
     await Promise.all(scanTasks);
+    // Hunter passes run AFTER the main scan so 0-ad verdicts are final; they
+    // reuse the same pools/concurrency and stay inside the same scanId.
+    for (const pass of hunterPasses) {
+      if (opts.signal?.aborted) break;
+      logger.info(
+        { device: pass.device, keywords: pass.keywords },
+        "domain hunter: 0-ad brands — probing numbered/variant auctions"
+      );
+      onProgress?.({
+        type: "scan-progress",
+        device: pass.device,
+        message: `Avcı adımı (${pass.device}) · reklamsız markalarda numaralı varyantlar deneniyor: ${pass.keywords.join(", ")}`,
+        phase: "domain-hunter",
+      });
+      await runDeviceScan(ctx, ads, pass.device, pass.keywords, deviceConcurrencies[pass.idx]!, onProgress, opts.signal);
+    }
   } finally {
     try {
       const finishedAt = new Date().toISOString();

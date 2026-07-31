@@ -988,12 +988,20 @@ export async function runClickEngine(
         );
       }
 
-      // Shuffle WITHIN each group only: own-label keeps priority, flex is the
-      // second-choice tail (natural look first). Cap applies to the joined list.
-      shuffleInPlace(ownIds);
+      // Seer pinning: profiles that SAW this domain's ad during the scan get
+      // absolute priority — they lead the pool so the per-device cap below can
+      // never shuffle them out (a seer's impression is the strongest serve
+      // signal there is). Seers in vault cooldown already failed passesGuards
+      // above, so they simply fall back to the normal pool. Flex stays the
+      // second-choice tail; cap applies to the joined list.
+      const seerIds = new Set((target.impressions ?? []).map((i) => i.profileId));
+      const ownSeers = ownIds.filter((id) => seerIds.has(id));
+      const ownRest = ownIds.filter((id) => !seerIds.has(id));
+      shuffleInPlace(ownSeers);
+      shuffleInPlace(ownRest);
       shuffleInPlace(flexIds);
       const ownSet = new Set(ownIds);
-      let ids = [...ownIds, ...flexIds];
+      let ids = [...ownSeers, ...ownRest, ...flexIds];
       if (clickCap > 0 && ids.length > clickCap) {
         ids = ids.slice(0, clickCap);
       }
@@ -1007,13 +1015,15 @@ export async function runClickEngine(
 
       const existing = deviceInputs.get(pool.device);
       if (existing) {
-        // Merge profiles and targets, dedup profiles — keep first-capped set + new.
+        // Merge profiles and targets, dedup profiles — seers of ANY merged
+        // target keep their pinned lead so the re-cap cannot drop them.
         const profileSet = new Set([...existing.profileIds, ...ids]);
-        let merged = [...profileSet];
-        for (let i = merged.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [merged[i], merged[j]] = [merged[j]!, merged[i]!];
-        }
+        const mergedSeerIds = new Set(
+          [...existing.targets, target].flatMap((t) => (t.impressions ?? []).map((i) => i.profileId))
+        );
+        const mergedSeers = shuffleInPlace([...profileSet].filter((id) => mergedSeerIds.has(id)));
+        const mergedRest = shuffleInPlace([...profileSet].filter((id) => !mergedSeerIds.has(id)));
+        let merged = [...mergedSeers, ...mergedRest];
         if (clickCap > 0 && merged.length > clickCap) merged = merged.slice(0, clickCap);
         existing.profileIds = merged;
         // Flex bookkeeping must survive the merge + re-cap.

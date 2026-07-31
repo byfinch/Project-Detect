@@ -3,6 +3,55 @@ import type { Device } from "../types.js";
 import type { ClickTarget } from "./types.js";
 import { analyzeScanClones } from "../analyze/cloneReport.js";
 
+/** One recorded impression: a profile that saw this domain's ad during a scan. */
+export interface SeerHint {
+  profileId: string;
+  device: string;
+  keyword: string;
+  title: string;
+  displayDomain: string;
+  lastSeenAt: string;
+}
+
+/**
+ * Seer hints for the ops engine: every recent impression (profile × device)
+ * of this domain, carrying the exact keyword + title that produced it.
+ * Exported for ops consumption — the click engine itself currently uses the
+ * ids-only ClickStore.recentSeers shortlist instead.
+ */
+export function getSeerHints(
+  store: Pick<Store, "db">,
+  domain: string,
+  sinceIso?: string
+): SeerHint[] {
+  const d = domain.toLowerCase().replace(/^www\./, "");
+  const since = sinceIso ?? new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+  const rows = store.db
+    .prepare(
+      `SELECT profile_id, device, keyword, title, display_domain, MAX(captured_at) AS last_seen
+       FROM results
+       WHERE LOWER(display_domain) IN (?, ?) AND captured_at > ?
+       GROUP BY profile_id, device
+       ORDER BY last_seen DESC`
+    )
+    .all(d, `www.${d}`, since) as Array<{
+    profile_id: string;
+    device: string;
+    keyword: string;
+    title: string;
+    display_domain: string;
+    last_seen: string;
+  }>;
+  return rows.map((r) => ({
+    profileId: r.profile_id,
+    device: r.device,
+    keyword: r.keyword,
+    title: r.title,
+    displayDomain: r.display_domain,
+    lastSeenAt: r.last_seen,
+  }));
+}
+
 /**
  * Build ClickTargets from a scan's clone/betting ads.
  *

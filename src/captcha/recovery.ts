@@ -1,14 +1,14 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AppConfig } from "../config.js";
 import { PROJECT_ROOT } from "../config.js";
 import { AdsPowerClient, captchaProxyFromProfile, type ProfileSummary } from "../adspower/client.js";
 import { BrowserSession } from "../browser/session.js";
-import { prepareGoogleConsent, recoverViaTrendClick } from "../google/serp.js";
+import { buildSerpUrl, gotoSerp, prepareGoogleConsent, recoverViaTrendClick } from "../google/serp.js";
 import { Store } from "../store/db.js";
 import { IpTrustStore, type TrustCookie } from "../store/ipTrust.js";
 import { logger } from "../logger.js";
-import { sleep } from "../util/time.js";
+import { jitterDelay, sleep } from "../util/time.js";
 
 const SOFT_KEYWORD = "hava durumu";
 
@@ -317,5 +317,218 @@ export async function runRecoveryLoop(
       console.log(`Sleeping ${Math.round(intervalMs / 60000)}m before next recovery pass…`);
     }
     await sleep(intervalMs);
+  }
+}
+
+/* --------------------------------------------------------------------------
+ * Interest pilot: light betting-neighbour browsing for a few pilot profiles,
+ * a couple of times a week. Goal: Google's ad personalisation keeps serving
+ * betting ads to these profiles, so scans see them more consistently.
+ * HARD limits: <= 2 searches per profile per run, interestPilotMaxQueriesPerDay
+ * daily ceiling, never runs the captcha solver (skipSolve) — the wall just
+ * ends that profile's turn.
+ * ------------------------------------------------------------------------ */
+
+const INTEREST_PILOT_STATE_FILE = "interest-pilot.json";
+const FALLBACK_INTEREST_KEYWORDS = ["spor bahisleri", "canlı skor", "maç sonuçları"];
+
+export interface InterestPilotProfileResult {
+  name: string;
+  profileId: string;
+  queries: string[];
+  organicVisits: number;
+  status: "ok" | "captcha" | "error" | "skipped";
+  error?: string;
+}
+
+export interface InterestPilotReport {
+  startedAt: string;
+  finishedAt: string;
+  profiles: InterestPilotProfileResult[];
+}
+
+export interface InterestPilotState {
+  lastRun: InterestPilotReport | null;
+  /** day (YYYY-MM-DD) → profile name → Google queries used. */
+  daily: Record<string, Record<string, number>>;
+}
+
+function interestPilotStatePath(outputDir: string): string {
+  return resolve(outputDir, INTEREST_PILOT_STATE_FILE);
+}
+
+export function readInterestPilotState(outputDir: string): InterestPilotState {
+  try {
+    const raw = JSON.parse(readFileSync(interestPilotStatePath(outputDir), "utf8")) as Partial<InterestPilotState>;
+    return { lastRun: raw.lastRun ?? null, daily: raw.daily ?? {} };
+  } catch {
+    return { lastRun: null, daily: {} };
+  }
+}
+
+/**
+ * One light interest-feeding round over the configured pilot profiles
+ * (config.interestPilotProfiles — empty list = feature off). Sequential and
+ * gentle: open profile → 1-2 betting-neighbour searches → 1-2 organic result
+ * visits → close. State (last run + daily counters) persists to
+ * data/interest-pilot.json and backs GET /api/interest/status.
+ */
+export async function runInterestPilotPass(config: AppConfig): Promise<InterestPilotReport> {
+  const report: InterestPilotReport = {
+    startedAt: new Date().toISOString(),
+    finishedAt: "",
+    profiles: [],
+  };
+  const pilotNames = config.interestPilotProfiles ?? [];
+  if (pilotNames.length === 0) {
+    report.finishedAt = new Date().toISOString();
+    return report;
+  }
+
+  const ads = new AdsPowerClient(config.adspower.baseUrl, config.adspower.apiKey, config.adspower.requestIntervalMs);
+  if (!(await ads.isUp())) {
+    throw new Error(`AdsPower Local API not reachable at ${config.adspower.baseUrl}`);
+  }
+
+  const store = new Store(config.output.dir);
+  const vault = new IpTrustStore(store.db);
+  try {
+    const state = readInterestPilotState(config.output.dir);
+    const today = new Date().toISOString().slice(0, 10);
+    const dailyToday = (state.daily[today] ??= {});
+    const dailyCap = Math.max(1, config.interestPilotMaxQueriesPerDay ?? 5);
+    const keywordPool =
+      config.interestPilotKeywords?.length > 0 ? config.interestPilotKeywords : FALLBACK_INTEREST_KEYWORDS;
+
+    const allProfiles = await ads.listProfiles();
+    const byName = new Map(allProfiles.map((p) => [p.name ?? p.user_id, p]));
+
+    logger.info({ pilots: pilotNames.length, dailyCap }, "interest pilot pass started");
+
+    for (const name of pilotNames) {
+      const p = byName.get(name);
+      const result: InterestPilotProfileResult = {
+        name,
+        profileId: p?.user_id ?? "",
+        queries: [],
+        organicVisits: 0,
+        status: "skipped",
+      };
+      report.profiles.push(result);
+
+      if (!p) {
+        result.error = "profile not found in AdsPower";
+        logger.warn({ name }, "interest pilot: profile not found — skipped");
+        continue;
+      }
+      result.profileId = p.user_id;
+
+      const usedToday = dailyToday[name] ?? 0;
+      if (usedToday >= dailyCap) {
+        result.error = `daily query cap reached (${usedToday}/${dailyCap})`;
+        continue;
+      }
+
+      // 1-2 searches this run, never past the daily ceiling.
+      const searchesThisRun = Math.min(1 + Math.floor(Math.random() * 2), dailyCap - usedToday);
+      const picked = [...keywordPool].sort(() => Math.random() - 0.5).slice(0, searchesThisRun);
+      const device = name.startsWith(config.scan.mobileProfilePrefix) ? "mobile" : "desktop";
+
+      let session: BrowserSession | null = null;
+      try {
+        await ads.stopBrowser(p.user_id).catch(() => {});
+        await sleep(600);
+        const ws = await ads.ensureBrowser(p.user_id);
+        session = await BrowserSession.attach(ws);
+
+        const trust = vault.get(p.user_id);
+        if (trust?.trustCookies?.length) {
+          await restoreTrustCookies(session, trust.trustCookies);
+        }
+        await prepareGoogleConsent(session);
+        if (device === "mobile") {
+          const { applyMobileEmulation } = await import("../browser/mobileEmulation.js");
+          await applyMobileEmulation(session.page);
+        }
+
+        for (const kw of picked) {
+          // skipSolve: a wall ends this profile's turn — the pilot must never
+          // burn the solver budget on vanity queries.
+          const nav = await gotoSerp(session, buildSerpUrl(config, kw), config, {
+            profileId: p.user_id,
+            skipSolve: true,
+          });
+          result.queries.push(kw);
+          dailyToday[name] = (dailyToday[name] ?? 0) + 1;
+          if (nav.captcha) {
+            result.status = "captcha";
+            logger.warn({ name, keyword: kw }, "interest pilot: captcha wall — profile turn ends (no solve)");
+            break;
+          }
+
+          // 1-2 organic result visits (never ad links) — light browsing signal.
+          const links = await session.page
+            .evaluate(() => {
+              const out: string[] = [];
+              for (const h of Array.from(document.querySelectorAll("#search h3"))) {
+                const a = h.closest("a");
+                const href = a?.href ?? "";
+                if (href && /^https?:/.test(href) && !/google\.[a-z.]+/i.test(href)) out.push(href);
+                if (out.length >= 5) break;
+              }
+              return out;
+            })
+            .catch(() => [] as string[]);
+          const visits = Math.min(links.length, 1 + Math.floor(Math.random() * 2));
+          for (let v = 0; v < visits; v++) {
+            try {
+              await session.page.goto(links[v]!, { timeout: 20_000, waitUntil: "domcontentloaded" });
+              result.organicVisits++;
+              await sleep(5_000 + Math.random() * 5_000);
+            } catch {
+              /* organic visit failed — ignore */
+            }
+          }
+          await jitterDelay(4_000, 9_000);
+        }
+
+        if (result.status !== "captcha") result.status = "ok";
+        try {
+          const cookies = await exportTrustCookies(session);
+          vault.markClean(p.user_id, cookies);
+        } catch {
+          /* non-fatal */
+        }
+        logger.info(
+          { name, queries: result.queries, organicVisits: result.organicVisits, status: result.status },
+          "interest pilot: profile round done"
+        );
+      } catch (err) {
+        result.status = "error";
+        result.error = String(err).slice(0, 300);
+        logger.warn({ name, err: result.error }, "interest pilot: profile round failed");
+      } finally {
+        const { gracefulProfileShutdown } = await import("../browser/shutdown.js");
+        await gracefulProfileShutdown(ads, session, p.user_id).catch(() => {});
+        session = null;
+      }
+      await sleep(3_000 + Math.random() * 4_000);
+    }
+
+    report.finishedAt = new Date().toISOString();
+    state.lastRun = report;
+    // Prune daily counters older than 7 days.
+    const cutoff = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    for (const day of Object.keys(state.daily)) {
+      if (day < cutoff) delete state.daily[day];
+    }
+    writeFileSync(interestPilotStatePath(config.output.dir), JSON.stringify(state, null, 2));
+    logger.info(
+      { profiles: report.profiles.length, ok: report.profiles.filter((r) => r.status === "ok").length },
+      "interest pilot pass complete"
+    );
+    return report;
+  } finally {
+    store.close();
   }
 }

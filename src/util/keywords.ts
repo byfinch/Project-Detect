@@ -27,6 +27,36 @@ export function loadKeywords(path: string): string[] {
   return out;
 }
 
+/**
+ * Auto-variant suffixes tried by the domain hunter when a brand finishes the
+ * scan with 0 ads (the light "giriş/bonus/güncel" set — the full 9-suffix
+ * expansion stays behind the manual "Varyant ekle" toggle).
+ */
+export const AUTO_VARIANT_SUFFIXES = ["giriş", "bonus", "güncel"];
+
+/**
+ * Numbered-domain hunter patterns. Betting crews rotate domains
+ * (rovbet1.com, rovbet365.net …), so a dead root keyword can still carry the
+ * ad under a numbered/suffixed auction. Pure-digit variants concatenate
+ * ("rovbet" + "365" → "rovbet365"), word variants space-join
+ * ("rovbet" + "güncel giriş" → "rovbet güncel giriş").
+ */
+export function hunterKeywordsForBrand(brand: string, hunterVariants: string[]): string[] {
+  const base = brand.trim().toLocaleLowerCase("tr");
+  if (!base) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const v of hunterVariants) {
+    const variant = v.trim();
+    if (!variant) continue;
+    const kw = /^\d+$/.test(variant) ? `${base}${variant}` : `${base} ${variant.toLocaleLowerCase("tr")}`;
+    if (seen.has(kw)) continue;
+    seen.add(kw);
+    out.push(kw);
+  }
+  return out;
+}
+
 /** Expand a list of brand keywords into query variations.
  *
  * The original brand is always included. Turkish suffixes such as
