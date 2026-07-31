@@ -130,7 +130,7 @@
     "missResetOnProductionMinutes": 15,
     "domainHysteresisMinutes": 10,
     "calmThreshold": 15,
-    "resumeThreshold": 5,
+    "resumeThreshold": 8,
     "maxActiveDomains": 2,
     "brandPriority": ["herabet", "primebahis", "napolibet", "rovbet", "vegasslot"],
     "browsers": 10,
