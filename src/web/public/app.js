@@ -442,6 +442,27 @@ function renderOpResultsPager(total, page, limit) {
   });
 }
 
+/** Süre: başlangıç → son aktivite ("3sa 12dk" / "45dk" / "2g 4sa"). */
+function fmtDur(a, b) {
+  if (!a) return "—";
+  const start = new Date(a).getTime();
+  const end = b ? new Date(b).getTime() : Date.now();
+  if (isNaN(start) || isNaN(end) || end < start) return "—";
+  let min = Math.round((end - start) / 60000);
+  if (min < 60) return `${min} dk`;
+  const h = Math.floor(min / 60);
+  min = min % 60;
+  if (h < 24) return min ? `${h}sa ${min}dk` : `${h}sa`;
+  const d = Math.floor(h / 24);
+  return `${d}g ${h % 24}sa`;
+}
+
+function opStateBadge(state) {
+  if (state === "active") return `<span class="badge run">AKTİF</span>`;
+  if (state === "idle") return `<span class="badge stale">UYUDU</span>`;
+  return `<span class="badge ok">TAMAM</span>`;
+}
+
 function renderOpResults(data) {
   const tbody = document.querySelector("#tbl-op-results tbody");
   const empty = document.getElementById("op-results-empty");
@@ -455,16 +476,13 @@ function renderOpResults(data) {
   }
   empty.style.display = "none";
   // Each row = ONE operation (all its waves/domains aggregated). Click → detail modal.
-  const opLabel = (id) => {
-    const s = String(id || "");
-    if (s.startsWith("run-")) return "#" + s.slice(4);
-    return s.length > 18 ? s.slice(0, 8) + "…" + s.slice(-5) : s;
-  };
+  // Kısa displayId (op-101…) gösterilir; teknik id title'da ve detayda kalır.
   const pct = (r) => (r.attempts > 0 ? Math.round((r.clicks / r.attempts) * 100) : 0);
   tbody.innerHTML = results
     .map(
       (r) => `<tr class="op-row" data-op="${esc(r.operationId)}" title="Detay için tıkla">
-        <td class="mono">${esc(opLabel(r.operationId))}</td>
+        <td class="mono" title="${esc(r.operationId)}">${esc(r.displayId || r.operationId)}</td>
+        <td>${opStateBadge(r.state)}</td>
         <td title="${esc(r.keywords || "")}">${esc((r.keywords || "—").length > 32 ? (r.keywords || "").slice(0, 32) + "…" : r.keywords || "—")}</td>
         <td>${esc(r.devices || "—")}</td>
         <td>${r.domainCount}</td>
@@ -472,6 +490,7 @@ function renderOpResults(data) {
         <td>${r.clicks}</td>
         <td>${r.reports}</td>
         <td class="muted">%${pct(r)}</td>
+        <td class="muted">${esc(fmtDur(r.startedAt, r.lastAt))}</td>
         <td class="muted" title="${r.startedAt ? new Date(r.startedAt).toLocaleString("tr-TR") : ""}">${fmtDT(r.startedAt)}</td>
       </tr>`
     )
@@ -503,10 +522,11 @@ async function openOpDetail(operationId) {
       body.innerHTML = `<div class="empty">Operasyon bulunamadı</div>`;
       return;
     }
+    // Başlık: kısa id + en çok tıklanan domain; teknik id meta satırında.
+    const topDomain = (d.byDomain || [])[0]?.domain || "";
+    title.textContent = `${d.displayId || "Operasyon"}${topDomain ? " · " + topDomain : ""}${(d.byDomain || []).length > 1 ? ` (+${d.byDomain.length - 1})` : ""}`;
     const pct = s.attempts > 0 ? Math.round((s.clicks / s.attempts) * 100) : 0;
-    const dur = s.startedAt && s.lastAt
-      ? Math.max(1, Math.round((new Date(s.lastAt) - new Date(s.startedAt)) / 60000)) + " dk"
-      : "—";
+    const dur = fmtDur(s.startedAt, s.lastAt);
     const chipHtml = (k, v, hero = false) =>
       `<div class="op-chip${hero ? " hero" : ""}"><div class="op-chip-k">${k}</div><div class="op-chip-v">${v}</div></div>`;
     const chips = [
@@ -522,7 +542,7 @@ async function openOpDetail(operationId) {
     const metaEl = document.getElementById("op-detail-meta");
     if (metaEl) {
       const arrow = `${fmtDT(s.startedAt)} → ${fmtDT(s.lastAt)}`;
-      metaEl.textContent = `${s.devices || "—"} · süre ${dur} · ${arrow}`;
+      metaEl.textContent = `${operationId} · ${s.devices || "—"} · süre ${dur} · ${arrow}`;
     }
 
     const STATUS_STYLE = {
@@ -671,8 +691,11 @@ function renderReportStats(s) {
   if (el("rep-week")) el("rep-week").textContent = s.week ?? 0;
   const total = Number(s.total) || 0;
   const confirmed = Number(s.confirmed) || 0;
-  if (el("rep-rate")) el("rep-rate").textContent = total > 0 ? `%${Math.round((confirmed / total) * 100)}` : "—";
-  if (el("rep-rate-sub")) el("rep-rate-sub").textContent = total > 0 ? `${confirmed}/${total} onaylı` : "";
+  const checked = Number(s.checked) || 0;
+  // Dürüst oran: onaylı ÷ KONTROL EDİLEN (arka plan backfill'i ilerledikçe
+  // payda büyür; oran hangi sayfanın açıldığına bağlı değildir).
+  if (el("rep-rate")) el("rep-rate").textContent = checked > 0 ? `%${Math.round((confirmed / checked) * 100)}` : "—";
+  if (el("rep-rate-sub")) el("rep-rate-sub").textContent = total > 0 ? `kontrol ${checked}/${total} · ${confirmed} onaylı` : "";
   if (el("rep-top")) {
     const tops = (s.topDomains || []).filter((d) => d.domain);
     el("rep-top").innerHTML = tops.length
@@ -738,14 +761,8 @@ function lazyGoogleChecks(results) {
           ? googleCell({ ...r, googleNotifId: g.googleNotifId })
           : `<span class="muted">bekleniyor</span>`;
       }
-      if (g.googleNotifId) {
-        // Özet şeridindeki onay oranı DB'den geliyor — bir satır dolduysa tazele.
-        const rateEl = document.getElementById("rep-rate");
-        if (rateEl && rateEl.dataset.pendingRefresh !== "1") {
-          rateEl.dataset.pendingRefresh = "1";
-          setTimeout(() => { delete rateEl.dataset.pendingRefresh; refresh(true); }, 4000);
-        }
-      }
+      // Özet şeridi artık buna BAĞLI DEĞİL — kontrol sayacı DB'de, 10 saniyelik
+      // periyodik refresh zaten taze özet çekiyor.
     } catch {
       const cell = document.querySelector(`.rep-gcheck[data-id="${r.id}"]`);
       if (cell) cell.outerHTML = `<span class="muted">bekleniyor</span>`;

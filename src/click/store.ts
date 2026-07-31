@@ -113,6 +113,17 @@ export class ClickStore {
     // /api/reports/google-check so the reporting summary can compute the
     // confirmation rate in SQL (no live mail lookups on list render).
     try { this.db.exec(`ALTER TABLE clicks ADD COLUMN google_notif_id TEXT;`); } catch { /* already exists */ }
+    // When the confirmation check ran (found or not) — the summary's
+    // "kontrol edilen" counter and the backfill's retry scheduling use this.
+    try { this.db.exec(`ALTER TABLE clicks ADD COLUMN google_checked_at TEXT;`); } catch { /* already exists */ }
+    // Stable short display ids for operations (op-101, op-102…) — assigned
+    // once per operation_id, never reused; technical ids stay untouched.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS op_names (
+        operation_id TEXT PRIMARY KEY,
+        seq          INTEGER NOT NULL
+      );
+    `);
     try { this.db.exec(`ALTER TABLE click_runs ADD COLUMN operation_id TEXT;`); } catch { /* already exists */ }
   }
 
@@ -579,6 +590,25 @@ export class ClickStore {
         reports: Number(r.reports),
       })),
     };
+  }
+
+  /**
+   * Stable short display id (op-101, op-102…) for an operation, assigned on
+   * first request and kept forever in op_names. Technical operation ids
+   * (click-ms3…, scan-152, ops-engine) are never rewritten — this is a label.
+   */
+  opDisplayId(operationId: string): string {
+    let row = this.db.prepare("SELECT seq FROM op_names WHERE operation_id = ?").get(operationId) as
+      | { seq: number }
+      | undefined;
+    if (!row) {
+      const next = (this.db.prepare("SELECT COALESCE(MAX(seq), 100) + 1 AS s FROM op_names").get() as { s: number }).s;
+      this.db.prepare("INSERT OR IGNORE INTO op_names (operation_id, seq) VALUES (?, ?)").run(operationId, next);
+      row = this.db.prepare("SELECT seq FROM op_names WHERE operation_id = ?").get(operationId) as
+        | { seq: number }
+        | undefined;
+    }
+    return `op-${row?.seq ?? "?"}`;
   }
 
   /** Full drill-down for one operation: per-domain, per-device, per-profile, timeline. */

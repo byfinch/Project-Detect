@@ -1024,7 +1024,29 @@ export function createWebServer(port: number): void {
     const store = new ClickStore(config.output.dir);
     try {
       const { total, results } = store.operationSummaries(page, limit);
-      res.json({ total, page, limit, results });
+      // Panel-facing labels + lifecycle state. The ops engine reuses ONE
+      // click_run forever, so its row is "active" exactly while the engine
+      // runs and "idle" (uyudu) otherwise; classic ops are done unless the
+      // matching focus campaign is live.
+      const engineRunning = getOpsEngineStatus().running;
+      const liveCampaignId = activeCampaign?.status === "running" ? activeCampaign.id : null;
+      res.json({
+        total,
+        page,
+        limit,
+        results: results.map((r) => ({
+          ...r,
+          displayId: store.opDisplayId(r.operationId),
+          state:
+            r.operationId === "ops-engine"
+              ? engineRunning
+                ? "active"
+                : "idle"
+              : liveCampaignId && r.operationId === liveCampaignId
+                ? "active"
+                : "done",
+        })),
+      });
     } finally {
       store.close();
     }
@@ -1039,7 +1061,7 @@ export function createWebServer(port: number): void {
     }
     const store = new ClickStore(config.output.dir);
     try {
-      res.json(store.operationDetail(operationId));
+      res.json({ displayId: store.opDisplayId(operationId), ...store.operationDetail(operationId) });
     } finally {
       store.close();
     }
@@ -1052,6 +1074,42 @@ export function createWebServer(port: number): void {
    * Filters: ?keyword= &domain= &operation= (operation_id of the click run).
    */
   const googleMailCache = new Map<string, { subject: string; date: string; notifId?: string | null; outcomeSubject?: string | null; fetchedAt: number }>();
+
+  /**
+   * Shared Google-confirmation lookup (panel google-check endpoint + the
+   * background backfill). google_checked_at is ALWAYS written (found or not)
+   * so the summary's "kontrol edilen" counter is honest; google_notif_id only
+   * when a notification id is found.
+   */
+  async function checkGoogleForClickRow(
+    store: ClickStore,
+    row: { id: number; captured_at?: unknown; report_message?: unknown }
+  ): Promise<{ email: string | null; notifId: string | null; outcome: string | null }> {
+    const email = /mail (?:pool|static):(\S+)/.exec(String(row.report_message || ""))?.[1] ?? null;
+    const nowIso = new Date().toISOString();
+    if (!email) {
+      // No pool address on record — nothing can ever arrive; count as checked.
+      store.db.prepare(`UPDATE clicks SET google_checked_at = ? WHERE id = ?`).run(nowIso, row.id);
+      return { email: null, notifId: null, outcome: null };
+    }
+    const cacheKey = `${email}|${String(row.captured_at ?? "").slice(0, 13)}`;
+    let full = googleMailCache.get(cacheKey) ?? null;
+    if (!full || Date.now() - full.fetchedAt >= 10 * 60_000) {
+      const pool = getEmailPool(config.output.dir);
+      const fetched = await pool.latestGoogleNotificationFull(email, String(row.captured_at ?? "")).catch(() => null);
+      if (fetched) {
+        full = { ...fetched, fetchedAt: Date.now() };
+        googleMailCache.set(cacheKey, full);
+      }
+    }
+    const notifId = full?.notifId ?? (full ? (/\b(\d{10,})\b/.exec(full.subject)?.[1] ?? null) : null);
+    if (notifId) {
+      store.db.prepare(`UPDATE clicks SET google_notif_id = ?, google_checked_at = ? WHERE id = ?`).run(notifId, nowIso, row.id);
+    } else {
+      store.db.prepare(`UPDATE clicks SET google_checked_at = ? WHERE id = ?`).run(nowIso, row.id);
+    }
+    return { email, notifId, outcome: full?.outcomeSubject ?? null };
+  }
 
   /** YYYY-MM-DD (TR takvim günü) → ISO sınırı; end=true gün sonu 23:59. */
   function trDayBoundaryIso(day: string, end: boolean): string | null {
@@ -1252,10 +1310,12 @@ export function createWebServer(port: number): void {
           `SELECT COUNT(*) AS total,
                   SUM(CASE WHEN c.captured_at >= ? THEN 1 ELSE 0 END) AS today,
                   SUM(CASE WHEN c.captured_at >= ? THEN 1 ELSE 0 END) AS week,
-                  SUM(CASE WHEN c.google_notif_id IS NOT NULL AND c.google_notif_id != '' THEN 1 ELSE 0 END) AS confirmed
+                  SUM(CASE WHEN c.google_notif_id IS NOT NULL AND c.google_notif_id != '' THEN 1 ELSE 0 END) AS confirmed,
+                  SUM(CASE WHEN (c.google_checked_at IS NOT NULL AND c.google_checked_at != '')
+                            OR (c.google_notif_id IS NOT NULL AND c.google_notif_id != '') THEN 1 ELSE 0 END) AS checked
            FROM clicks c WHERE ${REPORTED}`
         )
-        .get(dayStartIso, weekStartIso) as { total: number; today: number; week: number; confirmed: number };
+        .get(dayStartIso, weekStartIso) as { total: number; today: number; week: number; confirmed: number; checked: number };
       const topDomains = store.db
         .prepare(
           `SELECT c.target_domain AS domain, COUNT(*) AS n
@@ -1276,6 +1336,7 @@ export function createWebServer(port: number): void {
           today: Number(sumRow.today) || 0,
           week: Number(sumRow.week) || 0,
           confirmed: Number(sumRow.confirmed) || 0,
+          checked: Number(sumRow.checked) || 0,
           topDomains,
         },
       });
@@ -1310,25 +1371,8 @@ export function createWebServer(port: number): void {
         res.json({ id, email, googleNotifId: String(row.google_notif_id), googleOutcome: null, cached: true });
         return;
       }
-      if (!email) {
-        res.json({ id, email: null, googleNotifId: null, googleOutcome: null });
-        return;
-      }
-      const cacheKey = `${email}|${String(row.captured_at ?? "").slice(0, 13)}`;
-      let full = googleMailCache.get(cacheKey) ?? null;
-      if (!full || Date.now() - full.fetchedAt >= 10 * 60_000) {
-        const pool = getEmailPool(config.output.dir);
-        const fetched = await pool.latestGoogleNotificationFull(email, String(row.captured_at ?? "")).catch(() => null);
-        if (fetched) {
-          full = { ...fetched, fetchedAt: Date.now() };
-          googleMailCache.set(cacheKey, full);
-        }
-      }
-      const notifId = full?.notifId ?? (full ? (/\b(\d{10,})\b/.exec(full.subject)?.[1] ?? null) : null);
-      if (notifId) {
-        store.db.prepare(`UPDATE clicks SET google_notif_id = ? WHERE id = ?`).run(notifId, id);
-      }
-      res.json({ id, email, googleNotifId: notifId, googleOutcome: full?.outcomeSubject ?? null });
+      const checked = await checkGoogleForClickRow(store, { id, captured_at: row.captured_at, report_message: row.report_message });
+      res.json({ id, email: checked.email, googleNotifId: checked.notifId, googleOutcome: checked.outcome });
     } finally {
       store.close();
     }
@@ -2251,6 +2295,70 @@ export function createWebServer(port: number): void {
   }
 
   startProfileSupervisor();
+
+  /**
+   * Background Google-confirmation backfill — the summary strip's confirmation
+   * rate must NOT depend on which report pages a user happened to open (the
+   * lazy per-row check only covered visible rows). Every 10 min the OLDEST
+   * unchecked submitted/filled reports are checked against mail.tm in a small
+   * batch, capped per hour (report.googleCheckBackfillPerHour, default 30).
+   * Rows checked with no notification yet are retried after 24h — Google mail
+   * can arrive late; each retry rewrites google_checked_at so retries are
+   * naturally rate-limited too.
+   */
+  function startGoogleCheckBackfill(): void {
+    const TICK_MS = 10 * 60_000;
+    const RECHECK_AFTER_MS = 24 * 60 * 60_000;
+    let windowStart = Date.now();
+    let usedThisHour = 0;
+    let inFlight = false;
+
+    const tick = async (): Promise<void> => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const perHour = Math.max(1, Number(config.report.googleCheckBackfillPerHour) || 30);
+        if (Date.now() - windowStart >= 60 * 60_000) {
+          windowStart = Date.now();
+          usedThisHour = 0;
+        }
+        const remaining = perHour - usedThisHour;
+        if (remaining <= 0) return;
+        const batchSize = Math.min(remaining, Math.max(1, Math.ceil(perHour / 6)));
+        const recheckCutoff = new Date(Date.now() - RECHECK_AFTER_MS).toISOString();
+        const store = new ClickStore(config.output.dir);
+        try {
+          const rows = store.db
+            .prepare(
+              `SELECT id, captured_at, report_message FROM clicks
+               WHERE report_status IN ('submitted','filled')
+                 AND (google_notif_id IS NULL OR google_notif_id = '')
+                 AND (google_checked_at IS NULL OR google_checked_at = '' OR google_checked_at < ?)
+               ORDER BY captured_at ASC, id ASC LIMIT ?`
+            )
+            .all(recheckCutoff, batchSize) as Array<{ id: number; captured_at: string; report_message: string | null }>;
+          for (const row of rows) {
+            await checkGoogleForClickRow(store, row);
+            usedThisHour++;
+          }
+          if (rows.length > 0) {
+            logger.info({ batch: rows.length, usedThisHour, perHour }, "google-check backfill tick done");
+          }
+        } finally {
+          store.close();
+        }
+      } catch (err) {
+        logger.debug({ err: String(err) }, "google-check backfill tick failed");
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    setTimeout(() => void tick(), 90_000); // first sweep 90s after boot
+    setInterval(() => void tick(), TICK_MS);
+  }
+
+  startGoogleCheckBackfill();
 
   // ── Ops mode (unified system, Package 1) ─────────────────────
   // Richness watcher + domain planner + health valve. Everything is inert

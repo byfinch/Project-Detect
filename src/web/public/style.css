@@ -1250,7 +1250,7 @@ tr.op-row:hover { background: var(--accent-soft); }
   text-overflow: ellipsis;
   max-width: 170px;
 }
-#tbl-op-results td:nth-child(2) { white-space: normal; max-width: 220px; } /* keyword */
+#tbl-op-results td:nth-child(3) { white-space: normal; max-width: 220px; } /* keyword */
 #tbl-op-results td.mono { max-width: 130px; }
 
 /* Locked (default-brands) textarea */

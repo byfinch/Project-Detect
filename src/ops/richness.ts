@@ -241,8 +241,11 @@ export function ingestScanResults(scanId: number, brandPriority: string[]): numb
 
   for (const [key, hit] of seen) {
     const prev = st.domains.get(key);
-    const keywords = new Set(prev?.keywords ?? []);
-    keywords.add(hit.keyword);
+    // Recency-first keyword order: the keyword the ad was just seen on leads,
+    // the brand's other keywords stay behind it for rotation. The planner
+    // carries this order into the plan and the engine searches it first.
+    const rest = (prev?.keywords ?? []).filter((k) => k !== hit.keyword);
+    const keywords = [hit.keyword, ...rest].slice(0, 20);
     st.domains.set(key, {
       brand: hit.brand ?? prev?.brand ?? null,
       // Count = ads observed in THIS observation (freshness beats accumulation —
@@ -257,7 +260,7 @@ export function ingestScanResults(scanId: number, brandPriority: string[]): numb
         devices[hit.device] = (devices[hit.device] ?? 0) + 1;
         return devices;
       })(),
-      keywords: [...keywords].slice(0, 20),
+      keywords,
       lastSeenAt: now,
     });
   }
@@ -321,23 +324,36 @@ export function getActiveDomains(brandPriority: string[]): ActiveDomain[] {
   return out;
 }
 
-/** Probe matrix: every brand x device pair, in brand priority order. */
-function probeMatrix(config: AppConfig): Array<{ brand: string; device: string }> {
-  const out: Array<{ brand: string; device: string }> = [];
+/**
+ * Probe matrix: every brand ROOT keyword x device FIRST, then every
+ * "<brand> <variant>" x device (ops.watchVariants). Live case: the ad was
+ * served on "herabet bonus" while the watcher only probed the root — the
+ * variant set closes that blind spot. Budget rules are unchanged (max
+ * probes/tick) — a longer matrix just means a longer round-robin cycle.
+ */
+function probeMatrix(config: AppConfig): Array<{ keyword: string; device: string }> {
+  const roots: Array<{ keyword: string; device: string }> = [];
+  const variants: Array<{ keyword: string; device: string }> = [];
   for (const brand of config.ops.brandPriority) {
-    for (const device of config.devices) out.push({ brand: brand.toLocaleLowerCase("tr"), device });
+    const b = brand.toLocaleLowerCase("tr");
+    for (const device of config.devices) roots.push({ keyword: b, device });
+    for (const v of config.ops.watchVariants) {
+      const variant = v.trim();
+      if (!variant) continue;
+      for (const device of config.devices) variants.push({ keyword: `${b} ${variant}`, device });
+    }
   }
-  return out;
+  return [...roots, ...variants];
 }
 
 /**
- * One light probe: single profile, single brand keyword, single device.
+ * One light probe: single profile, single keyword, single device.
  * Reuses the full scanner pipeline (trend warm-up, vault, captcha policy) so
  * probes behave exactly like classic scans, just tiny. Marked with the
  * "ops-watch" scan note so panel scan guards do not confuse it with a
  * classic scan.
  */
-async function runProbe(config: AppConfig, brand: string, device: string): Promise<number> {
+async function runProbe(config: AppConfig, keyword: string, device: string): Promise<number> {
   const probeConfig: AppConfig = {
     ...config,
     devices: [device as AppConfig["devices"][number]],
@@ -357,7 +373,7 @@ async function runProbe(config: AppConfig, brand: string, device: string): Promi
       autoFocusCampaignAfterScan: false,
     },
   };
-  const summary = await runScan(probeConfig, [brand], undefined, {
+  const summary = await runScan(probeConfig, [keyword], undefined, {
     protectPool: true,
     scanNote: "ops-watch",
   });
@@ -400,17 +416,17 @@ async function watchTick(): Promise<void> {
       try {
         emit({
           type: "ops-watch",
-          brand: pair.brand,
+          keyword: pair.keyword,
           device: pair.device,
-          message: `Gözcü probe: ${pair.brand} · ${pair.device}`,
+          message: `Gözcü probe: ${pair.keyword} · ${pair.device}`,
         });
-        const scanId = await runProbe(config, pair.brand, pair.device);
+        const scanId = await runProbe(config, pair.keyword, pair.device);
         st.queries.push(Date.now());
         st.lastProbeAt = new Date().toISOString();
         const found = ingestScanResults(scanId, config.ops.brandPriority);
-        logger.info({ brand: pair.brand, device: pair.device, scanId, domains: found }, "ops watcher probe done");
+        logger.info({ keyword: pair.keyword, device: pair.device, scanId, domains: found }, "ops watcher probe done");
       } catch (err) {
-        logger.warn({ brand: pair.brand, device: pair.device, err: String(err) }, "ops watcher probe failed");
+        logger.warn({ keyword: pair.keyword, device: pair.device, err: String(err) }, "ops watcher probe failed");
       }
     }
     persist();

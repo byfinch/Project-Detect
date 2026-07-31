@@ -213,6 +213,8 @@ const ConfigSchema = z.object({
       autoSerpDelayMaxMs: z.number().int().nonnegative().default(90000),
       /** Email used in Google's required "E-posta" field when reporting an ad. */
       reportEmail: z.string().default(""),
+      /** Background Google-confirmation backfill budget (mail.tm lookups/hour). */
+      googleCheckBackfillPerHour: z.number().int().positive().default(30),
       /**
        * Rotating email pool (mail.tm) for report forms. LRU rotation:
        * consecutive reports never share an address, old ones may be reused.
@@ -247,7 +249,11 @@ const ConfigSchema = z.object({
       /** Watcher share of the total safe query budget (40 q/h), percent. */
       watchBudgetPct: z.number().min(0).max(100).default(10),
       /** Minimum richness score for a domain to count as RICH. */
-      richThreshold: z.number().nonnegative().default(2),
+      richThreshold: z.number().nonnegative().default(1),
+      /** Watcher variant suffixes per brand ("<brand> giriş" …); [] = roots only. */
+      watchVariants: z.array(z.string()).default(["giriş", "bonus", "güncel"]),
+      /** A point's miss counter resets when it produced within this window. */
+      missResetOnProductionMinutes: z.number().int().positive().default(15),
       /** Min minutes an active domain keeps its slot (anti-flap hysteresis). */
       domainHysteresisMinutes: z.number().int().positive().default(10),
       /** Vault captcha count above this -> calm (operation pauses). */
@@ -430,6 +436,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       autoSerpDelayMinMs: file.report?.autoSerpDelayMinMs ?? 30000,
       autoSerpDelayMaxMs: file.report?.autoSerpDelayMaxMs ?? 90000,
       reportEmail: process.env.REPORT_EMAIL || file.report?.reportEmail || "",
+      googleCheckBackfillPerHour: file.report?.googleCheckBackfillPerHour ?? 30,
       emailPool: {
         enabled: file.report?.emailPool?.enabled ?? true,
         minSize: file.report?.emailPool?.minSize ?? 500,
@@ -440,7 +447,11 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       enabled: file.ops?.enabled ?? false,
       watchIntervalMinutes: file.ops?.watchIntervalMinutes ?? 15,
       watchBudgetPct: file.ops?.watchBudgetPct ?? 10,
-      richThreshold: file.ops?.richThreshold ?? 2,
+      richThreshold: file.ops?.richThreshold ?? 1,
+      watchVariants: Array.isArray(file.ops?.watchVariants)
+        ? (file.ops.watchVariants as string[]).map(String)
+        : ["giriş", "bonus", "güncel"],
+      missResetOnProductionMinutes: file.ops?.missResetOnProductionMinutes ?? 15,
       domainHysteresisMinutes: file.ops?.domainHysteresisMinutes ?? 10,
       calmThreshold: file.ops?.calmThreshold ?? 15,
       resumeThreshold: file.ops?.resumeThreshold ?? 5,

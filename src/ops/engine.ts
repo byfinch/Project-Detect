@@ -86,6 +86,8 @@ interface PointState {
   clicks: number;
   reports: number;
   fails: number;
+  /** Last time this point produced a click or report (miss-reset window). */
+  lastProductionAt: number;
   lastAction: string | null;
   serpUrl: string | null;
   serpFinalUrl: string | null;
@@ -494,6 +496,7 @@ class OpsEngine {
       clicks: 0,
       reports: 0,
       fails: 0,
+      lastProductionAt: 0,
       lastAction: null,
       serpUrl: null,
       serpFinalUrl: null,
@@ -554,9 +557,14 @@ class OpsEngine {
         }
         if (point.domain !== target.domain) {
           // Plan change (hysteresis respected upstream): switch gracefully.
+          // Plan keywords are recency-ordered (the keyword the ad was seen on
+          // first) — tab 0 searches the proven auction, siblings take the
+          // next variants; rotation cycles the rest.
           point.domain = target.domain;
           point.keyword =
-            target.keywords[Math.floor(Math.random() * target.keywords.length)] ?? target.domain;
+            target.keywords[point.tabIndex % Math.max(1, target.keywords.length)] ??
+            target.keywords[0] ??
+            target.domain;
           point.serpUrl = null;
           point.misses = 0;
           this.emitPoint(slot, point, `yeni domain · ${target.domain} · ${point.keyword}`);
@@ -701,15 +709,20 @@ class OpsEngine {
       }
 
       if (!targetAd) {
-        point.misses++;
+        // (a) Production beats misses: a point that produced a click/report
+        // within missResetOnProductionMinutes is in a live auction — its
+        // miss counter resets instead of declaring blindness.
+        const prodWindowMs = this.config.ops.missResetOnProductionMinutes * 60_000;
+        const producedRecently = Date.now() - point.lastProductionAt < prodWindowMs;
+        point.misses = producedRecently ? 0 : point.misses + 1;
         point.state = "miss";
         if (point.misses >= ops.maxMisses) {
-          // Back to the planner: force a fresh plan read; the next cycle
-          // re-assigns (possibly the same domain — richness may have moved).
+          // (c) Genuine drought: this IP looks ad-blind for the auction —
+          // close the browser; the supervisor spawns a FRESH profile and
+          // planner hysteresis keeps the domain alive across the swap.
           this.refreshPlanIfDue(true);
-          point.misses = 0;
-          point.domain = null;
-          this.emitPoint(slot, point, `${ops.maxMisses} ıska — planlayıcıya dön`);
+          this.emitPoint(slot, point, `${ops.maxMisses} ıska — profil değişiyor (plan korunuyor)`);
+          slot.stopRequested = true;
           return jitterSec(ops.missRetrySec) * 1000;
         }
         point.lastAction = `reklam yok (${point.misses}/${ops.maxMisses})`;
@@ -860,6 +873,7 @@ class OpsEngine {
     if (result.status === "success") {
       point.clicks++;
       this.totals.clicks++;
+      point.lastProductionAt = Date.now();
       this.infraStreak.delete(slot.profileId);
       const d = this.perDomain.get(domainKey) ?? { clicks: 0, reports: 0 };
       d.clicks++;
@@ -876,6 +890,7 @@ class OpsEngine {
     if (repOk) {
       point.reports++;
       this.totals.reports++;
+      point.lastProductionAt = Date.now();
       const d = this.perDomain.get(domainKey) ?? { clicks: 0, reports: 0 };
       d.reports++;
       this.perDomain.set(domainKey, d);
