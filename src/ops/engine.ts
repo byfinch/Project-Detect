@@ -293,27 +293,44 @@ class OpsEngine {
     try {
       let ticks = 0;
       let wasDormant = true; // pool starts dormant until the planner has work
+      let lastDormantReason: string | null = null;
       while (!this.stopped) {
         this.refreshPlanIfDue(false);
         const busy = this.deps.isBusy();
-        // No active domains → no browsers. Slots only exist while the
-        // planner has work; an emptied plan drains the pool gracefully
-        // (points finish their current cycle via the stopRequested checks).
-        const dormant = busy || this.plan.length === 0;
+        const calm = this.deps.isCalm();
+        // No active domains, classic busy, OR health valve calm → no
+        // browsers. Slots only exist while there is real work; an emptied
+        // plan or a calm valve drains the pool gracefully (points finish
+        // their current cycle via the stopRequested checks) instead of
+        // idling open browsers + heartbeat spam.
+        const reason: string | null = busy ? "busy" : calm ? "calm" : this.plan.length === 0 ? "no-plan" : null;
+        const dormant = reason !== null;
         if (dormant !== wasDormant) {
           wasDormant = dormant;
-          logger.info(
-            {
-              reason: busy ? "classic-op busy" : this.plan.length === 0 ? "plan empty" : "plan active",
-              planDomains: this.plan.length,
-            },
-            dormant
-              ? "ops engine: pool dormant — browser slots stay closed"
-              : "ops engine: plan active — opening browser slots"
-          );
+          if (dormant) {
+            lastDormantReason = reason;
+            logger.info({ reason, planDomains: this.plan.length }, "ops engine: pool dormant — browser slots closing");
+            this.deps.emit({
+              type: "ops-point",
+              reason,
+              message:
+                reason === "calm"
+                  ? "valf calm — pool kapanıyor"
+                  : reason === "busy"
+                    ? "klasik operasyon aktif — pool yol veriyor"
+                    : "plan boş — pool kapanıyor",
+            });
+          } else {
+            logger.info({ was: lastDormantReason, planDomains: this.plan.length }, "ops engine: work available — opening browser slots");
+            this.deps.emit({
+              type: "ops-point",
+              message: lastDormantReason === "calm" ? "calm kalktı — pool açılıyor" : "plan aktif — pool açılıyor",
+            });
+            lastDormantReason = null;
+          }
         }
         // Classic campaign/scan/storm owns the browser ceiling — yield ALL.
-        if (busy) {
+        if (dormant) {
           for (const slot of this.slots.values()) slot.stopRequested = true;
         }
         const desired = dormant ? 0 : this.effectiveBrowsers();
@@ -961,8 +978,8 @@ class OpsEngine {
     this.lastStatsSig = sig;
     this.lastStatsAt = now;
     const message =
-      idle && this.plan.length === 0
-        ? `ops · beklemede · aktif domain yok · toplam ${s.totals.clicks} tık · ${s.totals.reports} rapor`
+      idle
+        ? `ops · beklemede · ${this.deps.isCalm() ? "valf calm" : this.plan.length === 0 ? "aktif domain yok" : "duraklatıldı"} · toplam ${s.totals.clicks} tık · ${s.totals.reports} rapor`
         : `ops · ${s.browsers} tarayıcı · ${s.activePoints} nokta · ${s.totals.clicks} tık · ${s.totals.reports} rapor · ${s.totals.queriesLastHour} sorgu/saat`;
     this.deps.emit({
       type: "ops-stats",
