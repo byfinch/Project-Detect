@@ -215,6 +215,10 @@ const ConfigSchema = z.object({
       reportEmail: z.string().default(""),
       /** Background Google-confirmation backfill budget (mail.tm lookups/hour). */
       googleCheckBackfillPerHour: z.number().int().positive().default(30),
+      /** Inbox poller interval (minutes) — pool addresses' mail.tm inboxes. */
+      inboxSyncMinutes: z.number().int().positive().default(15),
+      /** Inbox poller mail.tm call budget per hour (token + list + detail). */
+      inboxSyncPerHour: z.number().int().positive().default(200),
       /**
        * Rotating email pool (mail.tm) for report forms. LRU rotation:
        * consecutive reports never share an address, old ones may be reused.
@@ -437,6 +441,8 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       autoSerpDelayMaxMs: file.report?.autoSerpDelayMaxMs ?? 90000,
       reportEmail: process.env.REPORT_EMAIL || file.report?.reportEmail || "",
       googleCheckBackfillPerHour: file.report?.googleCheckBackfillPerHour ?? 30,
+      inboxSyncMinutes: file.report?.inboxSyncMinutes ?? 15,
+      inboxSyncPerHour: file.report?.inboxSyncPerHour ?? 200,
       emailPool: {
         enabled: file.report?.emailPool?.enabled ?? true,
         minSize: file.report?.emailPool?.minSize ?? 500,

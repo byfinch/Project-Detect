@@ -111,6 +111,8 @@
     "autoSerpDelayMinMs": 30000,
     "autoSerpDelayMaxMs": 90000,
     "reportEmail": "ho6y2cyg1h@lnovic.com",
+    "inboxSyncMinutes": 15,
+    "inboxSyncPerHour": 200,
     "emailPool": {
       "enabled": true,
       "minSize": 500,

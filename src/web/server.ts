@@ -14,6 +14,8 @@ import { analyzeScanClones } from "../analyze/cloneReport.js";
 import { expandBrandKeywords } from "../util/keywords.js";
 import { buildAdComplaintPack } from "../report/adComplaintPack.js";
 import { getEmailPool } from "../report/emailPool.js";
+import { InboxStore, inboxSyncStatus, startInboxSync } from "../report/inboxSync.js";
+import { maskPoolAddress, ProofLinkStore } from "../report/proofLinks.js";
 import { solverCostSummary } from "../report/solverCost.js";
 import { getCaptchaPolicy } from "../captcha/policy.js";
 import {
@@ -77,6 +79,62 @@ function emitEvent(event: Record<string, unknown>): void {
 
 function createJobId(type: string): string {
   return `${type}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/** HTML-escape for server-rendered public pages (proof report). */
+function escHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/**
+ * Standalone neutral shell for the PUBLIC proof page — deliberately NOT the
+ * DETECT panel theme/branding; customers see a plain report document.
+ */
+function proofPageShell(title: string, body: string): string {
+  return `<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="robots" content="noindex,nofollow" />
+<title>${escHtml(title)}</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; background: #f4f6f8; color: #1f2933; padding: 32px 16px; }
+  .doc { max-width: 980px; margin: 0 auto; background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 32px; box-shadow: 0 2px 12px rgba(15,23,42,.06); }
+  h1 { font-size: 22px; font-weight: 700; color: #0f2740; padding-bottom: 14px; border-bottom: 3px solid #2563eb; margin-bottom: 12px; }
+  .meta { font-size: 13px; color: #64748b; margin-bottom: 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th { text-align: left; background: #0f2740; color: #fff; padding: 9px 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  td { padding: 10px; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+  tbody tr:nth-child(even) { background: #f8fafc; }
+  .nowrap { white-space: nowrap; }
+  .status { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 600; }
+  .status.ok { background: #dcfce7; color: #15803d; }
+  .status.bad { background: #fee2e2; color: #b91c1c; }
+  .status.dim { background: #e2e8f0; color: #475569; }
+  .mails { list-style: none; }
+  .mails li { margin-bottom: 6px; }
+  .mail-badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 700; margin-right: 4px; }
+  .mail-badge.ok { background: #dbeafe; color: #1d4ed8; }
+  .mail-badge.gold { background: #fef3c7; color: #b45309; border: 1px solid #f59e0b55; }
+  .mail-badge.dim { background: #e2e8f0; color: #475569; }
+  .mail-subject { font-weight: 600; color: #0f2740; }
+  .mail-meta { display: block; font-size: 12px; color: #64748b; margin-top: 1px; }
+  .no-mail { font-size: 12.5px; color: #94a3b8; font-style: italic; }
+  .empty-msg { padding: 24px; text-align: center; color: #64748b; }
+  .foot { margin-top: 20px; font-size: 12px; color: #94a3b8; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="doc">
+    <h1>${escHtml(title)}</h1>
+    ${body}
+    <p class="foot">Bu rapor, Google Ads reklam şikayetlerinin kayıt altına alındığını ve Google'a iletildiğini belgeler.</p>
+  </div>
+</body>
+</html>`;
 }
 
 const SCHEDULED_BRANDS = ["herabet", "rovbet", "napolibet", "primebahis", "vegasslot"];
@@ -2359,6 +2417,11 @@ export function createWebServer(port: number): void {
   }
 
   startGoogleCheckBackfill();
+  startInboxSync({
+    outputDir: config.output.dir,
+    intervalMinutes: config.report.inboxSyncMinutes ?? 15,
+    perHour: config.report.inboxSyncPerHour ?? 200,
+  });
 
   // ── Ops mode (unified system, Package 1) ─────────────────────
   // Richness watcher + domain planner + health valve. Everything is inert
@@ -2855,11 +2918,14 @@ export function createWebServer(port: number): void {
     }
   });
 
-  /** Health-scan pool addresses (dead accounts get disabled). */
+  /** Health-scan pool addresses (dead accounts get disabled, then replaced via refill). */
   app.post("/api/emails/pool/health", async (req: Request, res: Response) => {
     try {
       const pool = getEmailPool(config.output.dir);
-      const result = await pool.healthCheck(Number(req.body?.limit) > 0 ? Number(req.body.limit) : 50);
+      const result = await pool.healthCheck(Number(req.body?.limit) > 0 ? Number(req.body.limit) : 50, {
+        targetSize: config.report.emailPool.minSize,
+        perHour: config.report.emailPool.refillPerHour,
+      });
       res.json({ ok: true, ...result, stats: pool.stats() });
     } catch (err) {
       res.status(500).json({ error: String(err) });
@@ -2874,6 +2940,200 @@ export function createWebServer(port: number): void {
       res.json({ ok: true, stats: pool.stats() });
     } catch (err) {
       res.status(500).json({ error: String(err) });
+    }
+  });
+
+  // ── Mailler (wave 3): pool inbox replies from Google ───────────
+
+  /**
+   * Paginated inbox list (panel "Mailler" tab). Filters: keyword / domain
+   * (matched via the LINKED complaint), classified, dateFrom / dateTo
+   * (TR calendar days).
+   */
+  app.get("/api/mails", (req: Request, res: Response) => {
+    const page = Math.max(1, parseInt(String(req.query.page || "1"), 10) || 1);
+    const limit = Math.max(1, Math.min(50, parseInt(String(req.query.limit || "25"), 10) || 25));
+    const store = new InboxStore(config.output.dir);
+    try {
+      const { total, results } = store.list({
+        page,
+        limit,
+        keyword: String(req.query.keyword || "").trim() || undefined,
+        domain: String(req.query.domain || "").trim() || undefined,
+        classified: String(req.query.classified || "").trim() || undefined,
+        dateFromIso: trDayBoundaryIso(String(req.query.dateFrom || "").trim(), false) ?? undefined,
+        dateToIso: trDayBoundaryIso(String(req.query.dateTo || "").trim(), true) ?? undefined,
+      });
+      res.json({ total, page, limit, results });
+    } finally {
+      store.close();
+    }
+  });
+
+  /** Mini stats strip: totals per class + 7-day trend + poller status. */
+  app.get("/api/mails/stats", (_req: Request, res: Response) => {
+    const store = new InboxStore(config.output.dir);
+    try {
+      res.json({ ...store.stats(), sync: inboxSyncStatus() });
+    } finally {
+      store.close();
+    }
+  });
+
+  /**
+   * Mail detail for the modal. The plain-text body is fetched lazily from
+   * mail.tm on FIRST view and cached in inbox_messages.body_text — list
+   * renders never hit mail.tm. Raw HTML is never returned (text part or
+   * stripped text only).
+   */
+  app.get("/api/mails/:id", async (req: Request, res: Response) => {
+    const idParam = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const store = new InboxStore(config.output.dir);
+    try {
+      const row = store.get(String(idParam));
+      if (!row) {
+        res.status(404).json({ error: "mail yok" });
+        return;
+      }
+      let bodyText = row.bodyText;
+      if (!bodyText) {
+        try {
+          const pool = getEmailPool(config.output.dir);
+          bodyText = await pool.messageText(row.emailAddr, row.id);
+          if (bodyText) store.saveBody(row.id, bodyText);
+        } catch {
+          /* rate limit / dead account — snippet below is enough */
+        }
+      }
+      res.json({ ...row, bodyText: bodyText || row.snippet || "" });
+    } finally {
+      store.close();
+    }
+  });
+
+  /**
+   * Create a customer proof link: short random token → /proof/:token
+   * (public, login-free). Filters narrow which complaints the page shows.
+   */
+  app.post("/api/proof-links", (req: Request, res: Response) => {
+    try {
+      const store = new ProofLinkStore(config.output.dir);
+      try {
+        const link = store.create(
+          {
+            domain: String(req.body?.domain || "").trim() || undefined,
+            keyword: String(req.body?.keyword || "").trim() || undefined,
+          },
+          Number(req.body?.days) > 0 ? Number(req.body.days) : undefined
+        );
+        res.json({ ok: true, token: link.token, url: `/proof/${link.token}`, expiresAt: link.expiresAt, filters: link.filters });
+      } finally {
+        store.close();
+      }
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  /**
+   * PUBLIC customer proof page — no session required (registered before the
+   * auth catch-all; the /api guard only covers /api/*). Shows the filtered
+   * complaints plus their linked Google reply mails. Pool addresses are
+   * MASKED; passwords/tokens never leave the server.
+   */
+  app.get("/proof/:token", (req: Request, res: Response) => {
+    const tokenParam = Array.isArray(req.params.token) ? req.params.token[0] : req.params.token;
+    const linkStore = new ProofLinkStore(config.output.dir);
+    try {
+      const link = linkStore.get(String(tokenParam || ""));
+      if (!link) {
+        res
+          .status(404)
+          .send(proofPageShell("Rapor bulunamadı", `<p class="empty-msg">Bu kanıt linki geçersiz veya süresi dolmuş.</p>`));
+        return;
+      }
+      const clickStore = new ClickStore(config.output.dir);
+      const inbox = new InboxStore(config.output.dir);
+      try {
+        const parts: string[] = [`c.report_status IN ('submitted','filled','submit-failed')`];
+        const params: string[] = [];
+        if (link.filters.keyword) {
+          parts.push(`LOWER(c.keyword) LIKE ?`);
+          params.push(`%${link.filters.keyword.toLowerCase()}%`);
+        }
+        if (link.filters.domain) {
+          parts.push(`LOWER(c.target_domain) LIKE ?`);
+          params.push(`%${link.filters.domain.toLowerCase()}%`);
+        }
+        const clicks = clickStore.db
+          .prepare(
+            `SELECT c.id, c.keyword, c.target_domain, c.report_status, c.captured_at
+             FROM clicks c WHERE ${parts.join(" AND ")}
+             ORDER BY c.captured_at DESC LIMIT 500`
+          )
+          .all(...params) as Array<Record<string, unknown>>;
+        const mailsByClick = new Map<number, ReturnType<InboxStore["forClicks"]>>();
+        for (const m of inbox.forClicks(clicks.map((c) => Number(c.id)))) {
+          if (m.linkedClickId == null) continue;
+          const list = mailsByClick.get(m.linkedClickId) ?? [];
+          list.push(m);
+          mailsByClick.set(m.linkedClickId, list);
+        }
+
+        const STATUS_TR: Record<string, string> = {
+          submitted: "Gönderildi",
+          filled: "Dolduruldu",
+          "submit-failed": "Başarısız",
+        };
+        const CLASS_TR: Record<string, { label: string; cls: string }> = {
+          "google-confirmation": { label: "Google Onayı", cls: "ok" },
+          "google-outcome": { label: "İnceleme Sonucu", cls: "gold" },
+          other: { label: "Yanıt", cls: "dim" },
+        };
+        const fmtD = (iso: string) => {
+          const t = Date.parse(iso);
+          return Number.isFinite(t) ? new Date(t).toLocaleString("tr-TR", { timeZone: "Europe/Istanbul" }) : iso;
+        };
+        const filterTxt =
+          [link.filters.keyword && `keyword: ${link.filters.keyword}`, link.filters.domain && `domain: ${link.filters.domain}`]
+            .filter(Boolean)
+            .join(" · ") || "tüm şikayetler";
+
+        const rows = clicks
+          .map((c) => {
+            const mails = mailsByClick.get(Number(c.id)) ?? [];
+            const mailsHtml = mails.length
+              ? `<ul class="mails">${mails
+                  .map((m) => {
+                    const cm = CLASS_TR[m.classified] ?? CLASS_TR.other!;
+                    return `<li><span class="mail-badge ${cm.cls}">${escHtml(cm.label)}</span> <span class="mail-subject">${escHtml(m.subject || "(konu yok)")}</span><span class="mail-meta">${escHtml(fmtD(m.receivedAt))} · ${escHtml(maskPoolAddress(m.emailAddr))}</span></li>`;
+                  })
+                  .join("")}</ul>`
+              : `<span class="no-mail">Google yanıtı bekleniyor</span>`;
+            return `<tr>
+              <td class="nowrap">${escHtml(fmtD(String(c.captured_at ?? "")))}</td>
+              <td>${escHtml(String(c.keyword ?? ""))}</td>
+              <td>${escHtml(String(c.target_domain ?? ""))}</td>
+              <td class="nowrap"><span class="status ${c.report_status === "submitted" ? "ok" : c.report_status === "submit-failed" ? "bad" : "dim"}">${escHtml(STATUS_TR[String(c.report_status)] ?? String(c.report_status ?? ""))}</span></td>
+              <td>${mailsHtml}</td>
+            </tr>`;
+          })
+          .join("");
+
+        const body = `
+          <p class="meta">Filtre: ${escHtml(filterTxt)} · ${clicks.length} şikayet · rapor üretimi: ${escHtml(fmtD(new Date().toISOString()))} · link geçerlilik: ${escHtml(fmtD(link.expiresAt))}</p>
+          ${
+            clicks.length
+              ? `<table><thead><tr><th>Tarih</th><th>Keyword</th><th>Domain</th><th>Şikayet Durumu</th><th>Google Yanıtları</th></tr></thead><tbody>${rows}</tbody></table>`
+              : `<p class="empty-msg">Bu filtreyle eşleşen şikayet kaydı yok.</p>`
+          }`;
+        res.send(proofPageShell("Reklam Şikayet Kanıt Raporu", body));
+      } finally {
+        clickStore.close();
+        inbox.close();
+      }
+    } finally {
+      linkStore.close();
     }
   });
 

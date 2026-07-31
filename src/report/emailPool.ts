@@ -7,9 +7,9 @@
  * is handed out, so consecutive reports never share an address but older
  * addresses may be reused later (per ops decision).
  *
- * Inbox reading is intentionally out of scope for now — Google's report form
- * only asks for the address, no verification loop. Passwords are kept so a
- * future `GET /messages` integration can be added without recreating accounts.
+ * Inbox reading: `inboxList()` / `messageText()` power the wave-3 inbox
+ * poller (src/report/inboxSync.ts) — Google replies to report mails are
+ * collected, classified and linked back to complaint rows.
  */
 import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
@@ -26,7 +26,7 @@ const RATE_LIMIT_BACKOFF_MS = 30 * 60_000;
 const FRESH_RATIO = 0.3;
 
 /** mail.tm errors are shaped "mail.tm POST /accounts → 429 ...". */
-function isRateLimitOrServerError(err: unknown): boolean {
+export function isRateLimitOrServerError(err: unknown): boolean {
   return /→\s*(429|5\d\d)\b/.test(String(err));
 }
 
@@ -67,14 +67,36 @@ function randToken(len: number): string {
   return randomBytes(len).toString("hex").slice(0, len);
 }
 
+/** Strip an HTML mail part to plain text (scripts/styles/markup removed). */
+export function htmlToText(html: string): string {
+  return html
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|tr|h[1-6])>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
 class MailTmClient {
   private cachedDomains: string[] | null = null;
 
-  private async req<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async req<T>(method: string, path: string, body?: unknown, token?: string): Promise<T> {
     for (let attempt = 1; attempt <= 3; attempt++) {
+      const headers: Record<string, string> = {};
+      if (body) headers["Content-Type"] = "application/json";
+      if (token) headers.Authorization = `Bearer ${token}`;
       const res = await fetch(`${MAILTM_BASE}${path}`, {
         method,
-        headers: body ? { "Content-Type": "application/json" } : undefined,
+        headers: Object.keys(headers).length ? headers : undefined,
         body: body ? JSON.stringify(body) : undefined,
         signal: AbortSignal.timeout(20_000),
       });
@@ -126,6 +148,36 @@ class MailTmClient {
     const data = (await res.json()) as { "hydra:member"?: Array<{ id: string; from?: { address?: string }; subject?: string; createdAt?: string }> };
     return data["hydra:member"] ?? [];
   }
+
+  /**
+   * Full message list WITH intro/snippet — used by the inbox poller. Unlike
+   * messagesWithAuth this THROWS on 429/5xx (via req) so callers can back off
+   * instead of silently treating a rate limit as an empty inbox.
+   */
+  async messagesDetailed(
+    token: string
+  ): Promise<Array<{ id: string; from: string; subject: string; intro: string; createdAt: string }>> {
+    const data = await this.req<{ "hydra:member"?: Array<Record<string, unknown>> }>("GET", "/messages", undefined, token);
+    return (data["hydra:member"] ?? []).map((m) => ({
+      id: String(m.id ?? ""),
+      from: String((m.from as { address?: string } | undefined)?.address ?? ""),
+      subject: String(m.subject ?? ""),
+      intro: String(m.intro ?? ""),
+      createdAt: String(m.createdAt ?? ""),
+    }));
+  }
+
+  /**
+   * Message body as PLAIN TEXT for the panel/proof views — prefers mail.tm's
+   * text part; otherwise strips the HTML part down to text (no markup, no
+   * scripts — the raw HTML must never reach a client from this path).
+   */
+  async messageText(token: string, messageId: string): Promise<string> {
+    const safeId = encodeURIComponent(messageId);
+    const data = await this.req<{ text?: string; html?: string[] }>("GET", `/messages/${safeId}`, undefined, token);
+    if (data.text && data.text.trim()) return data.text;
+    return htmlToText((data.html ?? []).join("\n"));
+  }
 }
 
 export class EmailPool {
@@ -158,9 +210,13 @@ export class EmailPool {
   /**
    * Health scan: verify active addresses still authenticate (temp-mail accounts
    * can expire). Dead ones are marked disabled so LRU never hands them out.
-   * Bounded per call to respect the 8 QPS rate limit.
+   * Bounded per call to respect the 8 QPS rate limit. When refillTarget is
+   * given, a top-up is kicked off afterwards to replace the disabled accounts.
    */
-  async healthCheck(limit = 50): Promise<{ checked: number; alive: number; dead: number }> {
+  async healthCheck(
+    limit = 50,
+    refill?: { targetSize: number; perHour?: number }
+  ): Promise<{ checked: number; alive: number; dead: number }> {
     const rows = this.db
       .prepare(`SELECT address, password FROM email_pool WHERE status = 'active' ORDER BY last_used_at ASC NULLS FIRST LIMIT ?`)
       .all(limit) as Array<{ address: string; password: string }>;
@@ -181,7 +237,45 @@ export class EmailPool {
       }
       await sleep(350);
     }
+    // Replace what died — the refill path carries its own hourly budget and
+    // 30-min 429 backoff, so this cannot amplify a rate-limit storm.
+    if (dead > 0 && refill) {
+      this.ensureSize(refill.targetSize, refill.perHour ?? 40);
+    }
     return { checked: alive + dead, alive, dead };
+  }
+
+  /** Active pool addresses (inbox poller iterates these). */
+  activeAddresses(): string[] {
+    const rows = this.db
+      .prepare(`SELECT address FROM email_pool WHERE status = 'active' ORDER BY address`)
+      .all() as Array<{ address: string }>;
+    return rows.map((r) => r.address);
+  }
+
+  /**
+   * Full inbox listing for one pool address (id/from/subject/intro/date).
+   * Throws on mail.tm 429/5xx — the poller needs that signal to back off.
+   */
+  async inboxList(
+    address: string
+  ): Promise<Array<{ id: string; from: string; subject: string; intro: string; createdAt: string }>> {
+    const row = this.db.prepare(`SELECT password FROM email_pool WHERE address = ?`).get(address) as
+      | { password: string }
+      | undefined;
+    if (!row) return [];
+    const token = await this.client.token(address, row.password);
+    return this.client.messagesDetailed(token);
+  }
+
+  /** Plain-text body of one message (HTML stripped). Null when unknown address. */
+  async messageText(address: string, messageId: string): Promise<string | null> {
+    const row = this.db.prepare(`SELECT password FROM email_pool WHERE address = ?`).get(address) as
+      | { password: string }
+      | undefined;
+    if (!row) return null;
+    const token = await this.client.token(address, row.password);
+    return this.client.messageText(token, messageId);
   }
 
   /** Latest Google ads-support notification in this address's inbox (proof of submission). */

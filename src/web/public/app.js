@@ -302,6 +302,8 @@ async function refresh(force = false) {
     renderOpResults(opResultsRes);
     renderProof(proofRes);
     renderHealth(healthRes);
+    // Mailler sekmesi açıkken listeyi canlı tut (kendi endpoint'i, ucuz).
+    if (mailsViewVisible()) void refreshMails();
 
     const clickOpRunning = (ops.jobs || []).some((j) => j.type === "click" && j.status === "running");
     const locked = isScanRunningFromOps || clickOpRunning || Date.now() < scanStartLockUntil;
@@ -829,16 +831,225 @@ async function openReportDetail(id) {
     body.innerHTML = `
       <div class="rep-detail-actions">
         ${mailLink}
+        <button class="pager-btn" id="rep-proof-link-btn">Kanıt linki üret 🔗</button>
         <button class="pager-btn" id="rep-print">Yazdır ⎙</button>
       </div>
+      <div id="rep-proof-link-out"></div>
       <div class="op-chips">${chips}</div>
       <h3 class="op-sec">Kanıt Seti</h3>
       <div class="ev-grid">${evItems || `<div class="empty">Kanıt görseli yok</div>`}</div>`;
     document.getElementById("rep-print")?.addEventListener("click", () => window.print());
+    // Public müşteri kanıt linki: bu şikayetin keyword+domain'iyle filtrelenmiş.
+    document.getElementById("rep-proof-link-btn")?.addEventListener("click", async () => {
+      const out = document.getElementById("rep-proof-link-out");
+      if (!out) return;
+      out.innerHTML = `<div class="empty">Link üretiliyor…</div>`;
+      try {
+        const r = await API.post("/api/proof-links", { domain: d.domain, keyword: d.keyword });
+        const fullUrl = `${location.origin}${r.url}`;
+        out.innerHTML = `
+          <div class="proof-link-row">
+            <input type="text" readonly value="${esc(fullUrl)}" id="rep-proof-link-input" />
+            <button class="pager-btn" id="rep-proof-link-copy">Kopyala</button>
+          </div>
+          <div class="hint">Public link (login gerekmez) · geçerlilik: ${esc(fmtDT(r.expiresAt))}</div>`;
+        document.getElementById("rep-proof-link-copy")?.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(fullUrl);
+            document.getElementById("rep-proof-link-copy").textContent = "Kopyalandı ✓";
+          } catch {
+            document.getElementById("rep-proof-link-input")?.select();
+          }
+        });
+      } catch (err) {
+        out.innerHTML = `<div class="empty">Link üretilemedi: ${esc(String(err))}</div>`;
+      }
+    });
   } catch (err) {
     body.innerHTML = `<div class="empty">Detay yüklenemedi: ${esc(String(err))}</div>`;
   } finally {
     reportDetailLoading = false;
+  }
+}
+
+/* ── Mailler (wave 3): havuz inbox'ına gelen Google cevapları ── */
+let mailsPage = 1;
+const MAILS_LIMIT = 25;
+let mailsPollInFlight = false;
+
+function mailsViewVisible() {
+  return !document.getElementById("view-mails")?.classList.contains("hidden");
+}
+
+function mailFilterQs() {
+  const kw = document.getElementById("mail-filter-keyword")?.value.trim();
+  const dom = document.getElementById("mail-filter-domain")?.value.trim();
+  const cls = document.getElementById("mail-filter-classified")?.value;
+  const df = document.getElementById("mail-filter-from")?.value;
+  const dt = document.getElementById("mail-filter-to")?.value;
+  let qs = "";
+  if (kw) qs += `&keyword=${encodeURIComponent(kw)}`;
+  if (dom) qs += `&domain=${encodeURIComponent(dom)}`;
+  if (cls) qs += `&classified=${encodeURIComponent(cls)}`;
+  if (df) qs += `&dateFrom=${encodeURIComponent(df)}`;
+  if (dt) qs += `&dateTo=${encodeURIComponent(dt)}`;
+  return qs;
+}
+
+function mailClassBadge(cls) {
+  if (cls === "google-confirmation") return `<span class="badge ok">ONAY</span>`;
+  if (cls === "google-outcome") return `<span class="badge gold">SONUÇ</span>`;
+  return `<span class="badge stale">diğer</span>`;
+}
+
+async function refreshMails(force = false) {
+  if (mailsPollInFlight) return;
+  if (!force && !mailsViewVisible()) return; // görünmeyen görünümü poll etme
+  mailsPollInFlight = true;
+  try {
+    const [stats, list] = await Promise.all([
+      API.get("/api/mails/stats").catch(() => null),
+      API.get(`/api/mails?page=${mailsPage}&limit=${MAILS_LIMIT}${mailFilterQs()}`).catch(() => ({ results: [], total: 0, page: 1, limit: MAILS_LIMIT })),
+    ]);
+    renderMailStats(stats);
+    renderMails(list);
+  } finally {
+    mailsPollInFlight = false;
+  }
+}
+
+function renderMailStats(s) {
+  if (!s) return;
+  const el = (id) => document.getElementById(id);
+  const total = Number(s.total) || 0;
+  const confirmations = Number(s.confirmations) || 0;
+  if (el("mail-total")) el("mail-total").textContent = total;
+  if (el("mail-rate")) el("mail-rate").textContent = total > 0 ? `%${Math.round((confirmations / total) * 100)}` : "—";
+  if (el("mail-rate-sub")) el("mail-rate-sub").textContent = total > 0 ? `${confirmations} onay / ${total} mail` : "";
+  if (el("mail-outcomes")) el("mail-outcomes").textContent = s.outcomes ?? 0;
+  if (el("mail-linked")) el("mail-linked").textContent = s.linked ?? 0;
+  const meta = el("mails-sync-meta");
+  if (meta && s.sync) {
+    const last = s.sync.lastRunAt ? fmtTime(s.sync.lastRunAt) : "henüz çalışmadı";
+    const backoff = s.sync.backoffUntil ? ` · RATE-LIMIT: ${fmtTime(s.sync.backoffUntil)} kadar duraklatıldı` : "";
+    meta.textContent = `Senkron: ${last} · saatlik bütçe ${s.sync.callsUsedThisHour}/${s.sync.perHour}${backoff} · satıra tıkla, detayı gör`;
+  }
+}
+
+function renderMails(data) {
+  const tbody = document.querySelector("#tbl-mails tbody");
+  const empty = document.getElementById("mails-empty");
+  if (!tbody || !empty) return;
+  const results = data.results || [];
+  if (!results.length) {
+    tbody.innerHTML = "";
+    empty.style.display = "block";
+    document.getElementById("mails-pager").innerHTML = "";
+    return;
+  }
+  empty.style.display = "none";
+  tbody.innerHTML = results
+    .map((m) => {
+      const isGoogle = /google\.com/i.test(m.fromAddr || "");
+      const from = isGoogle
+        ? `<span class="g-icon" title="Google">G</span> <span class="muted">${esc(m.fromAddr)}</span>`
+        : `<span class="muted">${esc(m.fromAddr || "—")}</span>`;
+      const subj = (m.subject || "(konu yok)").length > 60 ? (m.subject || "").slice(0, 60) + "…" : m.subject || "(konu yok)";
+      const linked =
+        m.linkedClickId && (m.keyword || m.domain)
+          ? `<button class="mail-link" data-kw="${esc(m.keyword || "")}" data-dom="${esc(m.domain || "")}" title="Raporlama'da aç">${esc(m.keyword || "?")} · ${esc(m.domain || "?")}</button>`
+          : `<span class="muted">—</span>`;
+      return `<tr class="mail-row" data-id="${esc(m.id)}" title="Detay için tıkla">
+        <td class="muted nowrap">${esc(fmtDT(m.receivedAt))}</td>
+        <td class="nowrap">${from}</td>
+        <td title="${esc(m.subject || "")}">${esc(subj)}</td>
+        <td>${linked}</td>
+        <td>${mailClassBadge(m.classified)}</td>
+      </tr>`;
+    })
+    .join("");
+  tbody.querySelectorAll(".mail-link").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      goToReport(btn.dataset.kw, btn.dataset.dom);
+    });
+  });
+  tbody.querySelectorAll(".mail-row").forEach((row) => {
+    row.addEventListener("click", () => openMailDetail(row.dataset.id));
+  });
+  renderMailsPager(data.total || results.length, data.page || 1, data.limit || MAILS_LIMIT);
+}
+
+function renderMailsPager(total, page, limit) {
+  const pager = document.getElementById("mails-pager");
+  if (!pager) return;
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  if (totalPages <= 1) {
+    pager.innerHTML = "";
+    return;
+  }
+  let html = `<button class="pager-btn" ${page <= 1 ? "disabled" : ""} data-page="${page - 1}">Önceki</button>`;
+  html += `<span class="pager-info">Sayfa ${page} / ${totalPages} (${total})</span>`;
+  html += `<button class="pager-btn" ${page >= totalPages ? "disabled" : ""} data-page="${page + 1}">Sonraki</button>`;
+  pager.innerHTML = html;
+  pager.querySelectorAll(".pager-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      const next = Number(e.currentTarget.dataset.page);
+      if (next >= 1 && next <= totalPages) {
+        mailsPage = next;
+        refreshMails(true);
+      }
+    });
+  });
+}
+
+/** Bağlı şikayet linki: Raporlama sekmesini aynı filtrelerle aç. */
+function goToReport(keyword, domain) {
+  const kwEl = document.getElementById("proof-filter-keyword");
+  const domEl = document.getElementById("proof-filter-domain");
+  if (kwEl) kwEl.value = keyword || "";
+  if (domEl) domEl.value = domain || "";
+  proofPage = 1;
+  switchView("proof");
+  refresh(true);
+}
+
+/* ── Mail detay modal (mevcut modal kalıbı) ── */
+let mailDetailLoading = false;
+async function openMailDetail(id) {
+  if (mailDetailLoading || !id) return;
+  mailDetailLoading = true;
+  const modal = document.getElementById("op-detail-modal");
+  const body = document.getElementById("op-detail-body");
+  const title = document.getElementById("op-detail-title");
+  if (!modal || !body || !title) { mailDetailLoading = false; return; }
+  title.textContent = "Mail";
+  body.innerHTML = `<div class="empty">Yükleniyor…</div>`;
+  modal.classList.remove("hidden");
+  document.documentElement.classList.add("modal-open");
+  document.body.classList.add("modal-open");
+  try {
+    const m = await API.get(`/api/mails/${encodeURIComponent(id)}`);
+    title.textContent = m.subject || "(konu yok)";
+    const metaEl = document.getElementById("op-detail-meta");
+    if (metaEl) {
+      metaEl.textContent = `${new Date(m.receivedAt).toLocaleString("tr-TR")} · ${m.fromAddr || "?"} → ${m.emailAddr || "?"}`;
+    }
+    const chipHtml = (k, v) =>
+      `<div class="op-chip"><div class="op-chip-k">${k}</div><div class="op-chip-v">${v}</div></div>`;
+    const chips = [
+      chipHtml("Sınıf", mailClassBadge(m.classified)),
+      chipHtml("Havuz Adresi", `<span class="mono" style="font-size:11px">${esc(m.emailAddr || "—")}</span>`),
+      chipHtml("Bağlı Şikayet", m.linkedClickId ? `#${m.linkedClickId}` : "—"),
+    ].join("");
+    body.innerHTML = `
+      <div class="op-chips">${chips}</div>
+      <h3 class="op-sec">İçerik</h3>
+      <div class="mail-body">${esc(m.bodyText || m.snippet || "(içerik yok)")}</div>`;
+  } catch (err) {
+    body.innerHTML = `<div class="empty">Detay yüklenemedi: ${esc(String(err))}</div>`;
+  } finally {
+    mailDetailLoading = false;
   }
 }
 
@@ -1084,12 +1295,14 @@ function init() {
     btn.addEventListener("click", () => {
       switchView(btn.dataset.view);
       if (btn.dataset.view === "opsmode") refreshOpsMode(true);
+      if (btn.dataset.view === "mails") refreshMails(true);
     })
   );
   const savedView = localStorage.getItem(VIEW_KEY);
   if (savedView && document.getElementById("view-" + savedView)) {
     switchView(savedView);
     if (savedView === "opsmode") refreshOpsMode(true);
+    if (savedView === "mails") refreshMails(true);
   }
   document.getElementById("scan-form").addEventListener("submit", onScanSubmit);
 
@@ -1143,6 +1356,20 @@ function init() {
     const exportBtn = document.getElementById("proof-export");
     if (exportBtn) exportBtn.href = "/api/reports/submitted/export";
     refresh(true);
+  });
+  document.getElementById("mail-filter-apply")?.addEventListener("click", () => {
+    mailsPage = 1;
+    refreshMails(true);
+  });
+  document.getElementById("mail-filter-clear")?.addEventListener("click", () => {
+    for (const id of ["mail-filter-keyword", "mail-filter-domain", "mail-filter-from", "mail-filter-to"]) {
+      const el = document.getElementById(id);
+      if (el) el.value = "";
+    }
+    const clsEl = document.getElementById("mail-filter-classified");
+    if (clsEl) clsEl.value = "";
+    mailsPage = 1;
+    refreshMails(true);
   });
   const logoutBtn = document.getElementById("btn-logout");
   if (logoutBtn) {

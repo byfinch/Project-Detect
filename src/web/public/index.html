@@ -27,6 +27,7 @@
         <button class="nav-item active" data-view="scan">Tarama</button>
         <button class="nav-item" data-view="opsmode">Operasyon</button>
         <button class="nav-item" data-view="proof">Raporlama</button>
+        <button class="nav-item" data-view="mails">Mailler</button>
         <button class="nav-item" data-view="log">Terminal</button>
       </div>
     </div>
@@ -374,6 +375,62 @@
           </div>
           <div id="proof-empty" class="empty">Henüz gönderilmiş şikayet yok</div>
           <div id="proof-pager" class="pager"></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ═══ MAİLLER ═══ -->
+    <div class="view hidden" id="view-mails">
+      <header class="page-header">
+        <h1>Mailler</h1>
+        <p class="subtitle">Şikayet havuzuna gelen Google cevapları — onaylar ve inceleme sonuçları.</p>
+      </header>
+
+      <section class="panel" id="mails-panel">
+        <div class="panel-head">
+          <div class="panel-icon google-icon">✉</div>
+          <div>
+            <h2>Gelen Kutusu</h2>
+            <p class="panel-desc" id="mails-sync-meta">Havuz adreslerine düşen mailler — satıra tıkla, detayı gör.</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="rep-stats">
+            <div class="rep-stat"><div class="rep-stat-k">Toplam Cevap</div><div class="rep-stat-v" id="mail-total">—</div></div>
+            <div class="rep-stat" title="Onay oranı = Google onay maili ÷ toplam mail"><div class="rep-stat-k">Onay Oranı</div><div class="rep-stat-v" id="mail-rate">—</div><div class="rep-stat-sub" id="mail-rate-sub"></div></div>
+            <div class="rep-stat" title="Google'ın inceleme sonucu bildirdiği mailler (reklam kaldırıldı / askıya alındı)"><div class="rep-stat-k">SONUÇ (İnceleme)</div><div class="rep-stat-v gold" id="mail-outcomes">—</div></div>
+            <div class="rep-stat"><div class="rep-stat-k">Şikayete Bağlı</div><div class="rep-stat-v" id="mail-linked">—</div></div>
+          </div>
+          <div class="proof-filters">
+            <input type="text" id="mail-filter-keyword" placeholder="keyword" />
+            <input type="text" id="mail-filter-domain" placeholder="domain" />
+            <select id="mail-filter-classified">
+              <option value="">Tüm sınıflar</option>
+              <option value="google-confirmation">ONAY</option>
+              <option value="google-outcome">SONUÇ</option>
+              <option value="other">Diğer</option>
+            </select>
+            <input type="date" id="mail-filter-from" title="Başlangıç tarihi" />
+            <input type="date" id="mail-filter-to" title="Bitiş tarihi" />
+            <button id="mail-filter-apply" class="pager-btn">Filtrele</button>
+            <button id="mail-filter-clear" class="pager-btn">Temizle</button>
+          </div>
+          <div class="table-wrap">
+            <table id="tbl-mails">
+              <thead>
+                <tr>
+                  <th>Tarih</th>
+                  <th>Gönderen</th>
+                  <th>Konu</th>
+                  <th>Bağlı Şikayet</th>
+                  <th>Sınıf</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div id="mails-empty" class="empty">Henüz mail yok — inbox senkronu periyodik çalışır</div>
+          <div id="mails-pager" class="pager"></div>
         </div>
       </section>
     </div>
